@@ -1,0 +1,42 @@
+# Local MongoDB and Redis for development and tests.
+# Host ports 27018 and 6381 avoid clashing with other local MongoDB/Redis installs.
+services:
+  mongo:
+    image: mongo:8.0
+    # A single-node replica set: MongoDB only supports multi-document transactions on a
+    # replica set, and the ledger needs them
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
+    ports:
+      - "27018:27018"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Starts the replica set on first boot, then reports healthy once this node is primary
+      test:
+        - CMD
+        - mongosh
+        - --port
+        - "27018"
+        - --quiet
+        - --eval
+        - >-
+          try { rs.status() } catch (e) {
+          rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27018' }] }) }
+          quit(db.hello().isWritablePrimary ? 0 : 1)
+      interval: 5s
+      timeout: 10s
+      start_period: 20s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mongo-data:
