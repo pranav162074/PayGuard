@@ -1,10 +1,10 @@
 import { Writable } from "node:stream";
 
-import type { Express } from "express";
 import type { Redis } from "ioredis";
+import request from "supertest";
 import type { Connection } from "mongoose";
 
-import { createApp } from "../src/app.js";
+import { createApp, ensureIndexes, type App } from "../src/app.js";
 import { loadConfig, type Config } from "../src/config.js";
 import { connectMongo } from "../src/db.js";
 import { createLogger, type Logger } from "../src/logger.js";
@@ -44,7 +44,7 @@ export function memoryLogger(): { logger: Logger; lines: () => Record<string, un
 }
 
 export type TestApp = {
-  app: Express;
+  app: App;
   config: Config;
   mongo: Connection;
   redis: Redis;
@@ -52,7 +52,7 @@ export type TestApp = {
 };
 
 export async function startTestApp(
-  options: { config?: Partial<Config>; logger?: Logger } = {},
+  options: { config?: Partial<Config>; logger?: Logger; now?: () => number } = {},
 ): Promise<TestApp> {
   const config = testConfig(options.config);
   const mongo = await connectMongo(config.mongoUrl);
@@ -61,7 +61,8 @@ export async function startTestApp(
   await redis.connect();
   await redis.flushdb();
   const logger = options.logger ?? createLogger("silent");
-  const app = createApp({ config, logger, mongo, redis });
+  const app = createApp({ config, logger, mongo, redis, now: options.now });
+  await ensureIndexes(app.locals.models);
   return {
     app,
     config,
@@ -71,5 +72,78 @@ export async function startTestApp(
       await mongo.close();
       redis.disconnect();
     },
+  };
+}
+
+export type Session = {
+  accessToken: string;
+  /** The refresh cookie, ready to send back as a Cookie header. */
+  cookie: string;
+  userId: string;
+  merchantId: string;
+};
+
+export function refreshCookieFrom(res: { headers: Record<string, unknown> }): string {
+  const setCookie = res.headers["set-cookie"] as string[] | undefined;
+  const cookie = setCookie?.find((c) => c.startsWith("pg_refresh="));
+  if (!cookie) throw new Error("No refresh cookie in the response");
+  return cookie.split(";")[0] as string;
+}
+
+let counter = 0;
+
+export async function signup(
+  app: App,
+  fields: Partial<{ email: string; password: string; name: string; businessName: string }> = {},
+): Promise<Session & { email: string; password: string }> {
+  counter += 1;
+  const body = {
+    email: `owner${counter}@example.com`,
+    password: "correct horse battery",
+    name: "Owner",
+    businessName: `Shop ${counter}`,
+    ...fields,
+  };
+  const res = await request(app).post("/v1/auth/signup").send(body);
+  if (res.status !== 201) throw new Error(`Signup failed: ${res.status} ${res.text}`);
+  return {
+    accessToken: res.body.accessToken as string,
+    cookie: refreshCookieFrom(res),
+    userId: res.body.user.id as string,
+    merchantId: res.body.merchant.id as string,
+    email: body.email,
+    password: body.password,
+  };
+}
+
+export function bearer(token: string): { Authorization: string } {
+  return { Authorization: `Bearer ${token}` };
+}
+
+/** Invites someone with a role and has them accept as a new user; returns their session. */
+export async function addMember(
+  app: App,
+  owner: Session,
+  role: "owner" | "developer" | "analyst",
+): Promise<Session & { email: string; password: string }> {
+  counter += 1;
+  const email = `member${counter}@example.com`;
+  const password = "member password 123";
+  const invited = await request(app)
+    .post("/v1/team/invitations")
+    .set(bearer(owner.accessToken))
+    .send({ email, role });
+  if (invited.status !== 201) throw new Error(`Invite failed: ${invited.text}`);
+  const accepted = await request(app)
+    .post("/v1/auth/accept-invitation")
+    .send({ token: invited.body.token, password, name: "Member" });
+  if (accepted.status !== 201) throw new Error(`Accept failed: ${accepted.text}`);
+  return {
+    accessToken: accepted.body.accessToken as string,
+    cookie: refreshCookieFrom(accepted),
+    userId: accepted.body.user.id as string,
+    merchantId: accepted.body.merchant.id as string,
+    email,
+    password,
   };
 }
