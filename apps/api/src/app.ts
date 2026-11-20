@@ -1,3 +1,5 @@
+import cookieParser from "cookie-parser";
+import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import type { Redis } from "ioredis";
@@ -9,18 +11,43 @@ import { mongoCheck, redisCheck } from "./health.js";
 import type { Logger } from "./logger.js";
 import { errorHandler, notFound } from "./middleware/errors.js";
 import { requestId } from "./middleware/requestId.js";
+import { ensureIndexes, registerModels, type Models } from "./models/index.js";
+import { RateLimiter } from "./ratelimit.js";
+import { apiKeysRouter } from "./routes/apiKeys.js";
+import { authRouter } from "./routes/auth.js";
+import type { RouteDeps } from "./routes/deps.js";
 import { healthRouter } from "./routes/health.js";
+import { meRouter } from "./routes/me.js";
+import { teamRouter } from "./routes/team.js";
 
 export type AppDeps = {
   config: Config;
   logger: Logger;
   mongo: Connection;
   redis: Redis;
+  /** The clock rate limits use; tests move it forward instead of waiting. */
+  now?: () => number;
 };
 
-export function createApp({ config, logger, mongo, redis }: AppDeps): Express {
-  const app = express();
+export type App = Express & { locals: { models: Models } };
+
+export { ensureIndexes };
+
+export function createApp({ config, logger, mongo, redis, now }: AppDeps): App {
+  const app = express() as App;
   app.disable("x-powered-by");
+  // Behind a proxy, take the client IP from X-Forwarded-For, trusting only that many hops
+  app.set("trust proxy", config.trustProxyHops);
+
+  const models = registerModels(mongo);
+  app.locals.models = models;
+  const deps: RouteDeps = {
+    config,
+    logger,
+    mongo,
+    models,
+    rateLimiter: new RateLimiter(redis, logger, now),
+  };
 
   app.use(requestId);
   app.use(
@@ -39,7 +66,10 @@ export function createApp({ config, logger, mongo, redis }: AppDeps): Express {
     }),
   );
   app.use(helmet());
+  // Only the dashboard's origins may call the API from a browser, with cookies
+  app.use(cors({ origin: config.corsOrigins, credentials: true }));
   app.use(express.json({ limit: config.jsonBodyLimit }));
+  app.use(cookieParser());
 
   app.use(
     healthRouter(
@@ -47,6 +77,11 @@ export function createApp({ config, logger, mongo, redis }: AppDeps): Express {
       config.healthCheckTimeoutMs,
     ),
   );
+
+  app.use(authRouter(deps));
+  app.use(meRouter(deps));
+  app.use(teamRouter(deps));
+  app.use(apiKeysRouter(deps));
 
   app.use(notFound);
   app.use(errorHandler(logger));

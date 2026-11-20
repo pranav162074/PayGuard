@@ -17,6 +17,9 @@ export default tseslint.config(
       "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: false }],
       "@typescript-eslint/restrict-template-expressions": ["error", { allowNumber: true }],
       "@typescript-eslint/consistent-type-imports": "error",
+      // Mongoose schemas and documents are plain objects typed as classes; this rule flags
+      // every schema field
+      "@typescript-eslint/no-unsafe-class-instance-assignment": "off",
     },
   },
   {
@@ -25,6 +28,8 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-unsafe-member-access": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
     },
   },
   {

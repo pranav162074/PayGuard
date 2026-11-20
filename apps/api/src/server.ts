@@ -1,4 +1,4 @@
-import { createApp } from "./app.js";
+import { createApp, ensureIndexes } from "./app.js";
 import { loadConfig } from "./config.js";
 import { connectMongo } from "./db.js";
 import { createLogger } from "./logger.js";
@@ -22,6 +22,8 @@ async function main(): Promise<void> {
   await redis.connect();
 
   const app = createApp({ config, logger, mongo, redis });
+  // Unique indexes enforce rules like "one account per email", so they must exist first
+  await ensureIndexes(app.locals.models);
   const server = app.listen(config.port, () => {
     logger.info({ port: config.port, env: config.nodeEnv }, "PayGuard API listening");
   });
