@@ -58,6 +58,44 @@ A merchant is a business. People log in to the dashboard and belong to one or mo
 
 **Rate limits**: sliding windows in Redis (one Lua script, so concurrent requests can't slip past): per API key or user, per IP and per email for login, per IP for signup. Responses carry `RateLimit-*` headers, and a `429` has `Retry-After`. If Redis is down, requests are allowed.
 
+## Ledger
+
+Every movement of money is recorded in a double-entry ledger, kept separately per merchant and per mode (test and live).
+
+**Chart of accounts** (balances in paise, positive on the account's normal side):
+
+| Account              | Type      | Means                                                       |
+| -------------------- | --------- | ----------------------------------------------------------- |
+| `gateway_receivable` | asset     | Captured by the payment gateway, not yet paid out to us     |
+| `bank`               | asset     | Settled money                                               |
+| `merchant_payable`   | liability | The merchant's balance: what we owe them. Can't go negative |
+| `fee_revenue`        | revenue   | Our processing fees                                         |
+
+A ₹100 payment with a 2% fee posts: debit `gateway_receivable` 10000, credit `merchant_payable` 9800, credit `fee_revenue` 200.
+
+**Guarantees**
+
+- **Integer money:** amounts are whole paise, never floats. Decimal strings are parsed digit by digit, fees round half up in integer arithmetic, and splits use largest-remainder allocation, so no paisa is lost or invented.
+- **Every entry balances:** debits must equal credits, or nothing is written.
+- **Atomic:** the entry, its postings and every affected balance are written in one MongoDB transaction.
+- **No overdrafts, even under concurrency:** a balance that can't go negative is decreased with a conditional update that only matches while the balance covers it. Ten concurrent ₹30 refunds against ₹100 give exactly three successes.
+- **Idempotent:** every entry has an idempotency key. A retry returns the original entry; the same key with different content is refused (`409`); simultaneous retries still post once.
+- **Immutable:** entries and postings can't be updated or deleted. Mistakes are fixed with a reversing entry, and each entry can be reversed once.
+- **Auditable:** each posting stores the account's balance right after it, giving running-balance statements. `verifyLedger` checks that total debits equal total credits and that every cached balance equals the sum of its postings.
+
+Property-based tests (fast-check) post random sequences of captures, settlements and refunds and check these invariants after every sequence.
+
+**Trade-off:** every payment updates the same `merchant_payable` document, so a very busy merchant's postings contend on that document, and MongoDB retries the conflicting transactions. At much higher volume, the balance would be split across several sub-accounts and summed on read.
+
+| Endpoint                                  | Who                                                       |
+| ----------------------------------------- | --------------------------------------------------------- |
+| `GET /v1/ledger/accounts?mode=test`       | anyone with `payments:read` (API keys see their own mode) |
+| `GET /v1/ledger/accounts/{code}/postings` | statement with running balances, cursor pagination        |
+| `GET /v1/ledger/entries/{id}`             | one entry and its lines                                   |
+| `GET /v1/ledger/verify`                   | the audit result                                          |
+
+Entries are posted by the payment flows (next branches), not through the public API.
+
 ## Checks
 
 The same checks CI runs on every pull request:
