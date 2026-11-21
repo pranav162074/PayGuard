@@ -1,10 +1,17 @@
+import {
+  ledgerAccountSchema,
+  ledgerEntrySchema,
+  ledgerPostingSchema,
+  type LedgerAccount,
+  type LedgerEntry,
+  type LedgerModels,
+  type LedgerPosting,
+} from "../ledger/models.js";
 import { Schema, type Connection, type InferSchemaType, type Model, type Types } from "mongoose";
 
-export const ROLES = ["owner", "developer", "analyst"] as const;
-export type Role = (typeof ROLES)[number];
+import { KEY_MODES, ROLES, type KeyMode, type Role } from "./constants.js";
 
-export const KEY_MODES = ["test", "live"] as const;
-export type KeyMode = (typeof KEY_MODES)[number];
+export { KEY_MODES, ROLES, type KeyMode, type Role };
 
 const timestamps = { timestamps: { createdAt: true, updatedAt: true } } as const;
 
@@ -109,7 +116,7 @@ export type Invitation = InferSchemaType<typeof invitationSchema> & { _id: Types
 export type RefreshToken = InferSchemaType<typeof refreshTokenSchema> & { _id: Types.ObjectId };
 export type ApiKey = InferSchemaType<typeof apiKeySchema> & { _id: Types.ObjectId };
 
-export type Models = {
+export type Models = LedgerModels & {
   User: Model<User>;
   Merchant: Model<Merchant>;
   Membership: Model<Membership>;
@@ -131,6 +138,17 @@ export function registerModels(connection: Connection): Models {
       "refresh_tokens",
     ),
     ApiKey: connection.model<ApiKey>("ApiKey", apiKeySchema, "api_keys"),
+    LedgerAccount: connection.model<LedgerAccount>(
+      "LedgerAccount",
+      ledgerAccountSchema,
+      "ledger_accounts",
+    ),
+    LedgerEntry: connection.model<LedgerEntry>("LedgerEntry", ledgerEntrySchema, "ledger_entries"),
+    LedgerPosting: connection.model<LedgerPosting>(
+      "LedgerPosting",
+      ledgerPostingSchema,
+      "ledger_postings",
+    ),
   };
 }
 
