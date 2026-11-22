@@ -249,7 +249,7 @@ async function applyLines(
     const updated = await models.LedgerAccount.findOneAndUpdate(
       filter,
       { $inc: { balance: delta, debits, credits } },
-      { session, new: true },
+      { session, returnDocument: "after" },
     ).lean();
     if (!updated && !("balance" in filter)) {
       // Not a balance problem: the account isn't visible to this transaction (created after

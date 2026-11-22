@@ -53,7 +53,7 @@ async function transition(
   const updated = await models.PaymentIntent.findOneAndUpdate(
     { _id: intentId, status: { $in: sourcesOf(to) } },
     { $set: { ...set, status: to }, $inc: { version: 1 } },
-    { session, new: true },
+    { session, returnDocument: "after" },
   ).lean<PaymentIntent>();
   if (updated) return updated;
   const current = await models.PaymentIntent.findById(intentId).session(session).lean();
@@ -156,7 +156,7 @@ export async function succeedIntent(deps: PaymentDeps, intentId: string): Promis
     const linked = await deps.models.PaymentIntent.findOneAndUpdate(
       { _id: intentId },
       { $set: { ledgerEntryId: entry._id } },
-      { session, new: true },
+      { session, returnDocument: "after" },
     ).lean<PaymentIntent>();
     if (!linked) throw new Error("Payment intent vanished mid-transaction");
     result = linked;
