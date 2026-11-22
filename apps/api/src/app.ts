@@ -19,6 +19,7 @@ import type { RouteDeps } from "./routes/deps.js";
 import { healthRouter } from "./routes/health.js";
 import { ledgerRouter } from "./routes/ledger.js";
 import { meRouter } from "./routes/me.js";
+import { paymentsRouter } from "./routes/payments.js";
 import { teamRouter } from "./routes/team.js";
 
 export type AppDeps = {
@@ -84,6 +85,7 @@ export function createApp({ config, logger, mongo, redis, now }: AppDeps): App {
   app.use(teamRouter(deps));
   app.use(apiKeysRouter(deps));
   app.use(ledgerRouter(deps));
+  app.use(paymentsRouter(deps));
 
   app.use(notFound);
   app.use(errorHandler(logger));

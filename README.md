@@ -58,6 +58,45 @@ A merchant is a business. People log in to the dashboard and belong to one or mo
 
 **Rate limits**: sliding windows in Redis (one Lua script, so concurrent requests can't slip past): per API key or user, per IP and per email for login, per IP for signup. Responses carry `RateLimit-*` headers, and a `429` has `Retry-After`. If Redis is down, requests are allowed.
 
+## Payment intents
+
+A payment intent is one attempt to collect an amount from a customer. Servers create them with an API key; the hosted checkout (coming) completes them.
+
+```bash
+curl -X POST localhost:4000/v1/payment_intents \
+  -H "Authorization: Bearer sk_test_..." -H "Idempotency-Key: order-1001" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 50000, "description": "Order #1001", "receipt": "order_1001"}'
+```
+
+Amounts are in paise (`50000` is ₹500.00), with a ₹1 minimum. Ids carry their type (`pi_...`, `evt_...`).
+
+**Lifecycle**
+
+```
+requires_payment --> processing --> succeeded
+       |                 +--> failed --> processing (the customer retries)
+       +--> canceled
+```
+
+- **Transitions are conditional updates:** a change only applies if the intent is still in a state that allows it. A late webhook, a double click or a cancel racing a payment can't move a payment backwards or apply twice; the loser gets `409 invalid_state`.
+- **Success is one transaction:** the status change, the ledger capture (debit receivable, credit the merchant the amount minus our fee, credit fee revenue) and the event all commit together. A payment is never "succeeded" without its ledger entry. Of three simultaneous success attempts, exactly one posts.
+- **Events (a transactional outbox):** every change appends an event (`payment_intent.created`, `payment_intent.succeeded`, ...) in the same transaction. Webhook delivery to merchants will read from it, so an event exists if and only if its change committed.
+- **Test mode:** `POST /v1/payment_intents/{id}/test_actions` with `{"outcome": "succeed" | "fail"}` simulates the customer paying, through the same code real payments will use. It's refused in live mode.
+
+**Idempotency keys**, as Stripe does them: send `Idempotency-Key` on any POST and retrying after a timeout returns the first response (`Idempotent-Replayed: true`) instead of creating a second payment.
+
+- The same key with a different request body is refused (`422`), since that's a bug in the caller.
+- A retry while the first request is still running gets `409` with `Retry-After`.
+- 4xx responses are saved and replayed too; 5xx aren't, so retrying a server error runs it again.
+- A key whose request crashed half-way unlocks after 60 seconds.
+- Keys are scoped to the merchant and mode, and kept for 24 hours.
+
+| Endpoint                                                                                                      | Needs            |
+| ------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `POST /v1/payment_intents`, `POST /v1/payment_intents/{id}/cancel`, `.../test_actions`                        | `payments:write` |
+| `GET /v1/payment_intents` (`status`, `limit`, `starting_after`), `GET /v1/payment_intents/{id}`, `.../events` | `payments:read`  |
+
 ## Ledger
 
 Every movement of money is recorded in a double-entry ledger, kept separately per merchant and per mode (test and live).

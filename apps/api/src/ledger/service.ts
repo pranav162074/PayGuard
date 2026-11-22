@@ -90,6 +90,10 @@ export async function ensureAccounts(
           },
         },
         upsert: true,
+        // Without this, Mongoose adds `$set: { updatedAt }`, turning every call into a real
+        // write to every account: needless I/O, and a write conflict with any transaction
+        // that has these accounts in its snapshot
+        timestamps: false,
       },
     })),
     { ordered: false },
@@ -117,7 +121,11 @@ export type PostResult = { entry: LedgerEntry; created: boolean };
 export async function postEntry(
   deps: LedgerDeps,
   input: EntryInput,
-  extra: { reversalOf?: Types.ObjectId } = {},
+  extra: {
+    reversalOf?: Types.ObjectId;
+    /** Post inside the caller's transaction, so the entry commits or aborts with its other writes. */
+    session?: ClientSession;
+  } = {},
 ): Promise<PostResult> {
   validateEntry(input);
   const { mongo, models } = deps;
@@ -146,33 +154,43 @@ export async function postEntry(
 
   const entryId = new Types.ObjectId();
   const postedAt = new Date();
+  const write = async (session: ClientSession) => {
+    await models.LedgerEntry.create(
+      [
+        {
+          _id: entryId,
+          merchantId,
+          mode: input.mode,
+          currency: input.currency,
+          description: input.description,
+          idempotencyKey: input.idempotencyKey,
+          fingerprint: hash,
+          lines: input.lines.map((line) => ({
+            accountId: (accounts.get(line.account) as LedgerAccount)._id,
+            accountCode: line.account,
+            direction: line.direction,
+            amount: line.amount,
+          })),
+          reference: input.reference,
+          reversalOf: extra.reversalOf ?? null,
+          postedAt,
+        },
+      ],
+      { session },
+    );
+    await applyLines(models, session, accounts, input.lines, entryId, merchantId, postedAt);
+  };
+  if (extra.session) {
+    // The caller owns the transaction: its retry logic handles conflicts and duplicates
+    await write(extra.session);
+    const entry = await models.LedgerEntry.findById(entryId)
+      .session(extra.session)
+      .lean<LedgerEntry>();
+    if (!entry) throw new Error("Entry missing right after posting");
+    return { entry, created: true };
+  }
   try {
-    await mongo.transaction(async (session) => {
-      await models.LedgerEntry.create(
-        [
-          {
-            _id: entryId,
-            merchantId,
-            mode: input.mode,
-            currency: input.currency,
-            description: input.description,
-            idempotencyKey: input.idempotencyKey,
-            fingerprint: hash,
-            lines: input.lines.map((line) => ({
-              accountId: (accounts.get(line.account) as LedgerAccount)._id,
-              accountCode: line.account,
-              direction: line.direction,
-              amount: line.amount,
-            })),
-            reference: input.reference,
-            reversalOf: extra.reversalOf ?? null,
-            postedAt,
-          },
-        ],
-        { session },
-      );
-      await applyLines(models, session, accounts, input.lines, entryId, merchantId, postedAt);
-    });
+    await mongo.transaction(write);
   } catch (err) {
     // Two posts with the same key raced: the loser's transaction aborted on the unique index
     if (isDuplicateKey(err)) {
@@ -233,6 +251,11 @@ async function applyLines(
       { $inc: { balance: delta, debits, credits } },
       { session, new: true },
     ).lean();
+    if (!updated && !("balance" in filter)) {
+      // Not a balance problem: the account isn't visible to this transaction (created after
+      // its snapshot). Callers passing a session must run ensureAccounts() first.
+      throw new Error(`Ledger account ${code} not found inside the transaction`);
+    }
     if (!updated) {
       throw new ApiError(
         409,
