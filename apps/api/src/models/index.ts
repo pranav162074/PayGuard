@@ -7,6 +7,15 @@ import {
   type LedgerModels,
   type LedgerPosting,
 } from "../ledger/models.js";
+import {
+  idempotencyRecordSchema,
+  paymentEventSchema,
+  paymentIntentSchema,
+  type IdempotencyRecord,
+  type PaymentEvent,
+  type PaymentIntent,
+  type PaymentModels,
+} from "../payments/models.js";
 import { Schema, type Connection, type InferSchemaType, type Model, type Types } from "mongoose";
 
 import { KEY_MODES, ROLES, type KeyMode, type Role } from "./constants.js";
@@ -116,14 +125,15 @@ export type Invitation = InferSchemaType<typeof invitationSchema> & { _id: Types
 export type RefreshToken = InferSchemaType<typeof refreshTokenSchema> & { _id: Types.ObjectId };
 export type ApiKey = InferSchemaType<typeof apiKeySchema> & { _id: Types.ObjectId };
 
-export type Models = LedgerModels & {
-  User: Model<User>;
-  Merchant: Model<Merchant>;
-  Membership: Model<Membership>;
-  Invitation: Model<Invitation>;
-  RefreshToken: Model<RefreshToken>;
-  ApiKey: Model<ApiKey>;
-};
+export type Models = LedgerModels &
+  PaymentModels & {
+    User: Model<User>;
+    Merchant: Model<Merchant>;
+    Membership: Model<Membership>;
+    Invitation: Model<Invitation>;
+    RefreshToken: Model<RefreshToken>;
+    ApiKey: Model<ApiKey>;
+  };
 
 /** Registers the models on one connection (not mongoose's global one). */
 export function registerModels(connection: Connection): Models {
@@ -144,6 +154,21 @@ export function registerModels(connection: Connection): Models {
       "ledger_accounts",
     ),
     LedgerEntry: connection.model<LedgerEntry>("LedgerEntry", ledgerEntrySchema, "ledger_entries"),
+    PaymentIntent: connection.model<PaymentIntent>(
+      "PaymentIntent",
+      paymentIntentSchema,
+      "payment_intents",
+    ),
+    PaymentEvent: connection.model<PaymentEvent>(
+      "PaymentEvent",
+      paymentEventSchema,
+      "payment_events",
+    ),
+    IdempotencyRecord: connection.model<IdempotencyRecord>(
+      "IdempotencyRecord",
+      idempotencyRecordSchema,
+      "idempotency_keys",
+    ),
     LedgerPosting: connection.model<LedgerPosting>(
       "LedgerPosting",
       ledgerPostingSchema,

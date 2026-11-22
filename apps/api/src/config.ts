@@ -44,6 +44,9 @@ const schema = z.object({
   LOGIN_LIMIT_PER_IP: z.coerce.number().int().positive().default(30),
   LOGIN_LIMIT_PER_EMAIL: z.coerce.number().int().positive().default(10),
   SIGNUP_LIMIT_PER_IP: z.coerce.number().int().positive().default(5),
+
+  // Our processing fee, in basis points (200 = 2%)
+  PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(1000).default(200),
 });
 
 export type Config = {
@@ -65,6 +68,7 @@ export type Config = {
     loginPerEmail: number;
     signupPerIp: number;
   };
+  platformFeeBps: number;
   /** Refresh-token cookies are Secure (HTTPS only) everywhere except local development and tests. */
   secureCookies: boolean;
 };
@@ -107,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       loginPerEmail: c.LOGIN_LIMIT_PER_EMAIL,
       signupPerIp: c.SIGNUP_LIMIT_PER_IP,
     },
+    platformFeeBps: c.PLATFORM_FEE_BPS,
     secureCookies: c.NODE_ENV === "production",
   };
 }
