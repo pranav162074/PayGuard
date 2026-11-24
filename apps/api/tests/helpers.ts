@@ -52,7 +52,12 @@ export type TestApp = {
 };
 
 export async function startTestApp(
-  options: { config?: Partial<Config>; logger?: Logger; now?: () => number } = {},
+  options: {
+    config?: Partial<Config>;
+    logger?: Logger;
+    now?: () => number;
+    razorpayFetch?: typeof fetch;
+  } = {},
 ): Promise<TestApp> {
   const config = testConfig(options.config);
   const mongo = await connectMongo(config.mongoUrl);
@@ -61,7 +66,14 @@ export async function startTestApp(
   await redis.connect();
   await redis.flushdb();
   const logger = options.logger ?? createLogger("silent");
-  const app = createApp({ config, logger, mongo, redis, now: options.now });
+  const app = createApp({
+    config,
+    logger,
+    mongo,
+    redis,
+    now: options.now,
+    razorpayFetch: options.razorpayFetch,
+  });
   await ensureIndexes(app.locals.models);
   return {
     app,

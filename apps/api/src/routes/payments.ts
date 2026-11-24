@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { z } from "zod";
 
 import { ApiError } from "../errors.js";
+import { GatewayError } from "../gateway/razorpay.js";
 import { MAX_AMOUNT } from "../ledger/money.js";
 import { authenticate, principalOf, requirePermission } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
@@ -15,6 +16,7 @@ import {
   succeedIntent,
   type PaymentDeps,
 } from "../payments/service.js";
+import { syncIntent, type CheckoutDeps } from "../payments/checkout.js";
 import { PAYMENT_STATUSES } from "../payments/stateMachine.js";
 import { duplicateField, parse } from "../validation.js";
 import type { RouteDeps } from "./deps.js";
@@ -72,7 +74,8 @@ function metadataOf(intent: PaymentIntent): Record<string, string> {
   return raw instanceof Map ? Object.fromEntries(raw) : { ...raw };
 }
 
-export function intentJson(intent: PaymentIntent) {
+export function intentJson(intent: PaymentIntent, checkoutUrl: string) {
+  const checkoutOpen = intent.status === "requires_payment" || intent.status === "failed";
   return {
     id: intent._id,
     object: "payment_intent",
@@ -88,6 +91,18 @@ export function intentJson(intent: PaymentIntent) {
     net: typeof intent.fee === "number" ? intent.amount - intent.fee : null,
     failure_reason: intent.failureReason,
     ledger_entry_id: intent.ledgerEntryId?.toString() ?? null,
+    // Give these to the customer's browser: the hosted page, or your own page using the
+    // secret with GET /v1/checkout/{id}
+    client_secret: intent.clientSecret,
+    checkout_url: checkoutOpen
+      ? `${checkoutUrl}/pay/${intent._id}?client_secret=${encodeURIComponent(intent.clientSecret)}`
+      : null,
+    gateway: {
+      provider: intent.gateway?.provider ?? null,
+      order_id: intent.gateway?.orderId ?? null,
+      payment_id: intent.gateway?.paymentId ?? null,
+      method: intent.gateway?.method ?? null,
+    },
     created_at: intent.createdAt,
     succeeded_at: intent.succeededAt,
     canceled_at: intent.canceledAt,
@@ -101,6 +116,7 @@ export function paymentsRouter(deps: RouteDeps): Router {
     models,
     feeBasisPoints: config.platformFeeBps,
   };
+  const checkout: CheckoutDeps = { ...payments, gateways: deps.gateways, logger };
   const router = Router();
   router.use("/v1/payment_intents", authenticate(deps));
   const write = [requirePermission("payments:write"), idempotency(models, logger)];
@@ -129,7 +145,7 @@ export function paymentsRouter(deps: RouteDeps): Router {
         customer: { email: body.customer?.email ?? null, phone: body.customer?.phone ?? null },
         metadata: new Map(Object.entries(body.metadata ?? {})),
       });
-      res.status(201).json(intentJson(intent));
+      res.status(201).json(intentJson(intent, config.checkoutUrl));
     } catch (err) {
       if (duplicateField(err) === "merchantId") {
         throw new ApiError(
@@ -167,13 +183,13 @@ export function paymentsRouter(deps: RouteDeps): Router {
       .lean<PaymentIntent[]>();
     res.json({
       object: "list",
-      data: rows.slice(0, query.limit).map(intentJson),
+      data: rows.slice(0, query.limit).map((row) => intentJson(row, config.checkoutUrl)),
       has_more: rows.length > query.limit,
     });
   });
 
   router.get("/v1/payment_intents/:id", requirePermission("payments:read"), async (req, res) => {
-    res.json(intentJson(await load(req)));
+    res.json(intentJson(await load(req), config.checkoutUrl));
   });
 
   router.get(
@@ -198,8 +214,28 @@ export function paymentsRouter(deps: RouteDeps): Router {
 
   router.post("/v1/payment_intents/:id/cancel", ...write, async (req, res) => {
     const intent = await load(req);
-    res.json(intentJson(await cancelIntent(payments, intent._id)));
+    res.json(intentJson(await cancelIntent(payments, intent._id), config.checkoutUrl));
   });
+
+  /**
+   * Ask Razorpay about this payment now (a customer says they paid but the checkout never
+   * confirmed, say). Safe to call any number of times.
+   */
+  router.post(
+    "/v1/payment_intents/:id/sync",
+    requirePermission("payments:write"),
+    async (req, res) => {
+      const intent = await load(req);
+      try {
+        res.json(intentJson(await syncIntent(checkout, intent._id), config.checkoutUrl));
+      } catch (err) {
+        if (err instanceof GatewayError) {
+          throw new ApiError(502, "gateway_error", `The payment gateway failed: ${err.message}`);
+        }
+        throw err;
+      }
+    },
+  );
 
   /**
    * Test mode only: pretend the customer paid (or the payment failed), so the whole flow,
@@ -216,7 +252,7 @@ export function paymentsRouter(deps: RouteDeps): Router {
       body.outcome === "succeed"
         ? await succeedIntent(payments, intent._id)
         : await failIntent(payments, intent._id, body.failure_reason ?? "card_declined");
-    res.json(intentJson(updated));
+    res.json(intentJson(updated, config.checkoutUrl));
   });
 
   return router;

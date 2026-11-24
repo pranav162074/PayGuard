@@ -48,7 +48,8 @@ async function transition(
   session: ClientSession,
   intentId: string,
   to: PaymentStatus,
-  set: Partial<PaymentIntent> = {},
+  // Plain fields, or dotted paths into subdocuments like "gateway.paymentId"
+  set: Record<string, unknown> = {},
 ): Promise<PaymentIntent> {
   const updated = await models.PaymentIntent.findOneAndUpdate(
     { _id: intentId, status: { $in: sourcesOf(to) } },
@@ -75,6 +76,8 @@ export async function createIntent(
     | "ledgerEntryId"
     | "succeededAt"
     | "canceledAt"
+    | "clientSecret"
+    | "gateway"
   >,
 ): Promise<PaymentIntent> {
   let created: PaymentIntent | undefined;
@@ -102,6 +105,23 @@ export async function cancelIntent(deps: PaymentDeps, intentId: string): Promise
   return result as PaymentIntent;
 }
 
+/**
+ * The customer has paid on the checkout and the gateway is finishing up (or we couldn't
+ * reach it to find out yet). Webhooks or the reconciler move it on from here.
+ */
+export async function markProcessing(
+  deps: PaymentDeps,
+  intentId: string,
+  set: Record<string, unknown> = {},
+): Promise<PaymentIntent> {
+  let result: PaymentIntent | undefined;
+  await deps.mongo.transaction(async (session) => {
+    result = await transition(deps.models, session, intentId, "processing", set);
+    await recordEvent(deps.models, session, result, "payment_intent.processing");
+  });
+  return result as PaymentIntent;
+}
+
 export async function failIntent(
   deps: PaymentDeps,
   intentId: string,
@@ -122,7 +142,12 @@ export async function failIntent(
  * be "succeeded" without its ledger entry, or vice versa. Calling it twice is refused by the
  * state machine, and the ledger entry's idempotency key would refuse a second posting too.
  */
-export async function succeedIntent(deps: PaymentDeps, intentId: string): Promise<PaymentIntent> {
+export async function succeedIntent(
+  deps: PaymentDeps,
+  intentId: string,
+  // Extra fields to set with the status change, like the gateway's payment id
+  set: Record<string, unknown> = {},
+): Promise<PaymentIntent> {
   const intent = await deps.models.PaymentIntent.findById(intentId).lean<PaymentIntent>();
   if (!intent) throw new ApiError(404, "not_found", "Payment intent not found");
   if (!sourcesOf("succeeded").includes(intent.status)) throw invalidState(intent, "succeeded");
@@ -137,6 +162,7 @@ export async function succeedIntent(deps: PaymentDeps, intentId: string): Promis
     // conflict on this document, MongoDB retries its transaction, and the retry finds the
     // payment already succeeded (409) before it can post anything.
     result = await transition(deps.models, session, intentId, "succeeded", {
+      ...set,
       fee,
       succeededAt: new Date(),
     });
