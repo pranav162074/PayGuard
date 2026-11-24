@@ -24,13 +24,18 @@ export default tseslint.config(
   },
   {
     // supertest response bodies are untyped JSON; asserting on them is the point of a test
-    files: ["**/tests/**/*.ts"],
+    files: ["**/tests/**/*.{ts,tsx}"],
     rules: {
       "@typescript-eslint/no-unsafe-member-access": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-argument": "off",
       "@typescript-eslint/no-unsafe-call": "off",
     },
+  },
+  {
+    // The hosted checkout runs in the browser
+    files: ["apps/checkout/**/*.{ts,tsx}"],
+    languageOptions: { globals: globals.browser },
   },
   {
     files: ["**/*.js"],

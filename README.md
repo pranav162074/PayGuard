@@ -2,15 +2,16 @@
 
 A payment gateway with built-in fraud detection: merchants create payments through an API, customers pay on a hosted checkout (Razorpay underneath), every rupee is recorded in a double-entry ledger, and every payment is risk-scored in real time.
 
-Work in progress.
+Work in progress: see [ROADMAP.md](ROADMAP.md) for every planned branch and where it stands.
 
 ## Stack
 
-TypeScript on Node.js 22, Express 5, MongoDB 8 (replica set, for transactions) with Mongoose, Redis, Vitest, and React for the dashboard and checkout (coming).
+TypeScript on Node.js 22, Express 5, MongoDB 8 (replica set, for transactions) with Mongoose, Redis, Vitest, and React (the hosted checkout now, the dashboard later).
 
 ```
 apps/
   api/        Express API
+  checkout/   hosted payment page (React + Vite)
 docker-compose.yml   MongoDB (single-node replica set) and Redis for development and tests
 ```
 
@@ -60,7 +61,7 @@ A merchant is a business. People log in to the dashboard and belong to one or mo
 
 ## Payment intents
 
-A payment intent is one attempt to collect an amount from a customer. Servers create them with an API key; the hosted checkout (coming) completes them.
+A payment intent is one attempt to collect an amount from a customer. Servers create them with an API key; customers pay them on the hosted checkout (see [Taking payments with Razorpay](#taking-payments-with-razorpay)).
 
 ```bash
 curl -X POST localhost:4000/v1/payment_intents \
@@ -96,6 +97,53 @@ requires_payment --> processing --> succeeded
 | ------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `POST /v1/payment_intents`, `POST /v1/payment_intents/{id}/cancel`, `.../test_actions`                        | `payments:write` |
 | `GET /v1/payment_intents` (`status`, `limit`, `starting_after`), `GET /v1/payment_intents/{id}`, `.../events` | `payments:read`  |
+| `POST /v1/payment_intents/{id}/sync` (ask Razorpay now)                                                       | `payments:write` |
+
+## Taking payments with Razorpay
+
+Customers pay on PayGuard's hosted checkout (`apps/checkout`, React). Razorpay's own checkout window collects the card, UPI or netbanking details, so they never pass through PayGuard's code or servers. That keeps PayGuard out of most card-security (PCI) scope.
+
+```
+merchant server            PayGuard API                        Razorpay
+     | POST /v1/payment_intents |                                  |
+     |------------------------->| (returns checkout_url)           |
+customer opens checkout_url (apps/checkout)                          |
+     |--- GET /v1/checkout/{id} --> first open: create order ------->|
+     |<------------------------- amount, merchant, order_id ---------|
+     |        Razorpay's window (card / UPI / netbanking) ---------->|
+     |--- POST .../confirm (signed result) --> verify signature,     |
+     |                            ask Razorpay's API --------------->|
+     |                            <------------- payment: captured --|
+     |                            succeed: status + ledger + event   |
+```
+
+1. **Create** an intent with your API key. The response has a `client_secret` and a `checkout_url` (`{CHECKOUT_URL}/pay/{id}?client_secret=...`). Send the customer there, or build your own page on `GET /v1/checkout/{id}?client_secret=...`.
+2. **Open:** the first time the checkout opens, PayGuard creates a Razorpay order for the exact amount. Opening it again, or in five tabs at once, reuses one order (a conditional update keeps exactly one).
+3. **Pay:** the checkout gets back Razorpay's signed result. The API checks the HMAC signature (`order_id|payment_id` with our key secret, compared in constant time), then asks Razorpay's API what actually happened instead of trusting the browser.
+4. **Capture:** a captured payment succeeds the intent in one transaction, with the status, the ledger capture and the event together. A payment that was only authorized (an account without auto-capture) is captured first. If every attempt failed, the intent fails with the bank's reason and the customer can try again on the same order.
+
+**Safety:**
+
+- **Idempotent settling:** settling is idempotent. The browser confirming twice and the merchant calling `POST /v1/payment_intents/{id}/sync` at the same moment still give one capture and one ledger entry (tested).
+- **Razorpay unreachable:** if Razorpay can't be reached while the customer confirms, the intent is parked as `processing` instead of failing. The checkout keeps re-checking, and `sync` finishes it later. (Razorpay's webhooks, next branch, will do this automatically.)
+- **Amount mismatch:** a captured amount that doesn't match the intent is never marked paid; it is logged for a person to look at.
+- **Canceled intents:** a payment captured after its intent was canceled doesn't bring the intent back to life. It is logged as needing a refund (refunds come in branch 7).
+- **Scoped access:** the customer-facing endpoints are scoped to one intent by its client secret, compared in constant time. A wrong id and a wrong secret both give the same `404`, and they are rate limited per IP.
+- **Secret in the URL:** the checkout page sends no `Referer`, so the secret in its URL can't leak to other sites.
+
+**Trying it (test mode, free):**
+
+1. Create a Razorpay account and copy the **test** key id and secret (Account & Settings, API Keys) into `RAZORPAY_TEST_KEY_ID` and `RAZORPAY_TEST_KEY_SECRET` in `apps/api/.env`.
+2. Run the API (`npm run dev`) and the checkout (`npm run dev:checkout`, on port 5174; it forwards `/v1` to the API).
+3. Create a test-mode intent, open its `checkout_url`, and pay with one of [Razorpay's test cards or UPI ids](https://razorpay.com/docs/payments/payments/test-card-details/).
+
+| Endpoint                                  | Who                                                           |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| `GET /v1/checkout/{id}?client_secret=...` | the customer's browser: amount, merchant name, Razorpay order |
+| `POST /v1/checkout/{id}/confirm`          | the customer's browser: Razorpay's signed result              |
+| `POST /v1/payment_intents/{id}/sync`      | the merchant (`payments:write`): ask Razorpay now             |
+
+The API tests run against an in-memory fake of Razorpay's API, so they need no keys and never call Razorpay. The checkout's tests (React Testing Library) stand in for Razorpay's window.
 
 ## Ledger
 

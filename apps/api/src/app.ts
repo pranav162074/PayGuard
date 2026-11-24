@@ -9,12 +9,15 @@ import { pinoHttp } from "pino-http";
 import type { Config } from "./config.js";
 import { mongoCheck, redisCheck } from "./health.js";
 import type { Logger } from "./logger.js";
+import type { Fetch } from "./gateway/razorpay.js";
 import { errorHandler, notFound } from "./middleware/errors.js";
 import { requestId } from "./middleware/requestId.js";
 import { ensureIndexes, registerModels, type Models } from "./models/index.js";
+import { createGateways } from "./payments/checkout.js";
 import { RateLimiter } from "./ratelimit.js";
 import { apiKeysRouter } from "./routes/apiKeys.js";
 import { authRouter } from "./routes/auth.js";
+import { checkoutRouter } from "./routes/checkout.js";
 import type { RouteDeps } from "./routes/deps.js";
 import { healthRouter } from "./routes/health.js";
 import { ledgerRouter } from "./routes/ledger.js";
@@ -29,13 +32,15 @@ export type AppDeps = {
   redis: Redis;
   /** The clock rate limits use; tests move it forward instead of waiting. */
   now?: () => number;
+  /** How the app reaches Razorpay; tests pass a fake. */
+  razorpayFetch?: Fetch;
 };
 
 export type App = Express & { locals: { models: Models } };
 
 export { ensureIndexes };
 
-export function createApp({ config, logger, mongo, redis, now }: AppDeps): App {
+export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: AppDeps): App {
   const app = express() as App;
   app.disable("x-powered-by");
   // Behind a proxy, take the client IP from X-Forwarded-For, trusting only that many hops
@@ -49,6 +54,7 @@ export function createApp({ config, logger, mongo, redis, now }: AppDeps): App {
     mongo,
     models,
     rateLimiter: new RateLimiter(redis, logger, now),
+    gateways: createGateways(config, razorpayFetch),
   };
 
   app.use(requestId);
@@ -86,6 +92,7 @@ export function createApp({ config, logger, mongo, redis, now }: AppDeps): App {
   app.use(apiKeysRouter(deps));
   app.use(ledgerRouter(deps));
   app.use(paymentsRouter(deps));
+  app.use(checkoutRouter(deps));
 
   app.use(notFound);
   app.use(errorHandler(logger));

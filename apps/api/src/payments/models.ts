@@ -31,6 +31,18 @@ export const paymentIntentSchema = new Schema(
     fee: { type: Number, default: null }, // our fee, set when the payment succeeds
     failureReason: { type: String, default: null },
     ledgerEntryId: { type: Schema.Types.ObjectId, ref: "LedgerEntry", default: null },
+    // Lets the customer's browser load and pay this one intent on the hosted checkout, and
+    // nothing else. Like Stripe's client_secret: the merchant passes it to their frontend.
+    clientSecret: { type: String, required: true, default: () => newId("cs") },
+    // The payment as Razorpay knows it. The order is created when the checkout first opens.
+    gateway: {
+      provider: { type: String, enum: ["razorpay"], default: null },
+      orderId: { type: String, default: null },
+      paymentId: { type: String, default: null }, // the payment that succeeded
+      method: { type: String, default: null }, // card, upi, netbanking, wallet...
+      // Last time we asked Razorpay about this payment
+      checkedAt: { type: Date, default: null },
+    },
     succeededAt: { type: Date, default: null },
     canceledAt: { type: Date, default: null },
     // Incremented on every status change: the transition's optimistic-concurrency check
@@ -42,6 +54,11 @@ paymentIntentSchema.index({ merchantId: 1, mode: 1, createdAt: -1, _id: -1 });
 paymentIntentSchema.index(
   { merchantId: 1, mode: 1, receipt: 1 },
   { unique: true, partialFilterExpression: { receipt: { $type: "string" } } },
+);
+// Webhooks find the intent by Razorpay's order id
+paymentIntentSchema.index(
+  { "gateway.orderId": 1 },
+  { unique: true, partialFilterExpression: { "gateway.orderId": { $type: "string" } } },
 );
 
 /**

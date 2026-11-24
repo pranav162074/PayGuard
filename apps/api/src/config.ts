@@ -47,7 +47,26 @@ const schema = z.object({
 
   // Our processing fee, in basis points (200 = 2%)
   PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(1000).default(200),
+
+  // Razorpay, the gateway customers actually pay through. Test-mode payment intents use the
+  // test keys, live ones the live keys. A mode without keys can't take payments.
+  RAZORPAY_TEST_KEY_ID: z
+    .string()
+    .regex(/^rzp_test_\w+$/, "Must start with rzp_test_")
+    .optional(),
+  RAZORPAY_TEST_KEY_SECRET: z.string().min(8).optional(),
+  RAZORPAY_LIVE_KEY_ID: z
+    .string()
+    .regex(/^rzp_live_\w+$/, "Must start with rzp_live_")
+    .optional(),
+  RAZORPAY_LIVE_KEY_SECRET: z.string().min(8).optional(),
+  RAZORPAY_API_URL: z.url({ protocol: /^https?$/ }).default("https://api.razorpay.com/v1"),
+  // Where the hosted checkout app (apps/checkout) is served, for the checkout links we give
+  // merchants
+  CHECKOUT_URL: z.url({ protocol: /^https?$/ }).default("http://localhost:5174"),
 });
+
+export type GatewayKeys = { keyId: string; keySecret: string };
 
 export type Config = {
   nodeEnv: "development" | "test" | "production";
@@ -69,6 +88,13 @@ export type Config = {
     signupPerIp: number;
   };
   platformFeeBps: number;
+  razorpay: {
+    /** Keys per mode; null when that mode can't take payments. */
+    test: GatewayKeys | null;
+    live: GatewayKeys | null;
+    apiUrl: string;
+  };
+  checkoutUrl: string;
   /** Refresh-token cookies are Secure (HTTPS only) everywhere except local development and tests. */
   secureCookies: boolean;
 };
@@ -92,6 +118,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (c.NODE_ENV === "production" && c.JWT_SECRET === DEV_JWT_SECRET) {
     throw new ConfigError("Invalid configuration:\n  JWT_SECRET: Set a real secret in production");
   }
+  const keyPairs = [
+    [
+      "RAZORPAY_TEST_KEY_ID",
+      c.RAZORPAY_TEST_KEY_ID,
+      "RAZORPAY_TEST_KEY_SECRET",
+      c.RAZORPAY_TEST_KEY_SECRET,
+    ],
+    [
+      "RAZORPAY_LIVE_KEY_ID",
+      c.RAZORPAY_LIVE_KEY_ID,
+      "RAZORPAY_LIVE_KEY_SECRET",
+      c.RAZORPAY_LIVE_KEY_SECRET,
+    ],
+  ] as const;
+  for (const [idName, id, secretName, secret] of keyPairs) {
+    if (Boolean(id) !== Boolean(secret)) {
+      throw new ConfigError(
+        `Invalid configuration:\n  ${idName} and ${secretName} must be set together`,
+      );
+    }
+  }
+  const keys = (keyId?: string, keySecret?: string): GatewayKeys | null =>
+    keyId && keySecret ? { keyId, keySecret } : null;
   return {
     nodeEnv: c.NODE_ENV,
     port: c.PORT,
@@ -112,6 +161,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       signupPerIp: c.SIGNUP_LIMIT_PER_IP,
     },
     platformFeeBps: c.PLATFORM_FEE_BPS,
+    razorpay: {
+      test: keys(c.RAZORPAY_TEST_KEY_ID, c.RAZORPAY_TEST_KEY_SECRET),
+      live: keys(c.RAZORPAY_LIVE_KEY_ID, c.RAZORPAY_LIVE_KEY_SECRET),
+      apiUrl: c.RAZORPAY_API_URL.replace(/\/+$/, ""),
+    },
+    checkoutUrl: c.CHECKOUT_URL.replace(/\/+$/, ""),
     secureCookies: c.NODE_ENV === "production",
   };
 }
