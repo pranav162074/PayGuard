@@ -125,23 +125,45 @@ customer opens checkout_url (apps/checkout)                          |
 **Safety:**
 
 - **Idempotent settling:** settling is idempotent. The browser confirming twice and the merchant calling `POST /v1/payment_intents/{id}/sync` at the same moment still give one capture and one ledger entry (tested).
-- **Razorpay unreachable:** if Razorpay can't be reached while the customer confirms, the intent is parked as `processing` instead of failing. The checkout keeps re-checking, and `sync` finishes it later. (Razorpay's webhooks, next branch, will do this automatically.)
+- **Razorpay unreachable:** if Razorpay can't be reached while the customer confirms, the intent is parked as `processing` instead of failing. The webhook, the reconciler or a `sync` finishes it later.
 - **Amount mismatch:** a captured amount that doesn't match the intent is never marked paid; it is logged for a person to look at.
 - **Canceled intents:** a payment captured after its intent was canceled doesn't bring the intent back to life. It is logged as needing a refund (refunds come in branch 7).
 - **Scoped access:** the customer-facing endpoints are scoped to one intent by its client secret, compared in constant time. A wrong id and a wrong secret both give the same `404`, and they are rate limited per IP.
 - **Secret in the URL:** the checkout page sends no `Referer`, so the secret in its URL can't leak to other sites.
+
+### Webhooks and reconciliation
+
+Three paths can tell PayGuard about a payment: the browser's confirmation, Razorpay's webhooks, and a background reconciler. All three end in the same `syncIntent()`, which asks Razorpay's API for the truth and applies it through the state machine. So:
+
+- **A customer closing the tab** right after paying still gets marked paid, by the webhook.
+- **A missed webhook** (Razorpay down, our server down, a closed tunnel) is caught by the reconciler. Every `RECONCILE_INTERVAL_SECONDS` it asks Razorpay about unfinished payments that haven't changed for `RECONCILE_AFTER_SECONDS`, oldest check first, backing off on each one it checks.
+- **Out-of-order events** can't move a payment backwards. A `payment.failed` for an old attempt that arrives after the capture changes nothing, because the webhook only says _which_ order to look at, not what happened.
+- **All at once:** the browser, two webhooks and a manual sync racing still give one capture and one ledger entry, and the books stay balanced (tested).
+
+**`POST /v1/webhooks/razorpay`:**
+
+1. **Signature first.** The `X-Razorpay-Signature` HMAC-SHA256 is checked against the **raw** request body, before any JSON parsing. The route is mounted ahead of the JSON body parser for exactly this reason. A bad or missing signature gets `400` and nothing is touched.
+2. **Once per event.** Every event is stored under Razorpay's `X-Razorpay-Event-Id` (kept 30 days, for "did the webhook ever arrive?" debugging). A redelivered event that was already handled is acknowledged and skipped.
+3. **Retried on failure.** If handling fails (Razorpay's API down, say), the event is marked `failed` and the response is `500`, so Razorpay delivers it again. The retry is processed normally.
+4. **Ignored when irrelevant.** Events that don't affect payments, and orders this server didn't create (another app on the same Razorpay account), are acknowledged and marked `ignored`.
+
+The payment's status change, its ledger capture and its `payment_events` row are written in one Mongo transaction. That events collection is the transactional outbox that merchant webhooks (branch 8) will deliver from.
+
+Live keys need `RAZORPAY_WEBHOOK_SECRET`; the server refuses to start without it, because with real money a missed confirmation can't wait for the reconciler.
 
 **Trying it (test mode, free):**
 
 1. Create a Razorpay account and copy the **test** key id and secret (Account & Settings, API Keys) into `RAZORPAY_TEST_KEY_ID` and `RAZORPAY_TEST_KEY_SECRET` in `apps/api/.env`.
 2. Run the API (`npm run dev`) and the checkout (`npm run dev:checkout`, on port 5174; it forwards `/v1` to the API).
 3. Create a test-mode intent, open its `checkout_url`, and pay with one of [Razorpay's test cards or UPI ids](https://razorpay.com/docs/payments/payments/test-card-details/).
+4. For webhooks, expose the API with a tunnel (`ngrok http 4000`). In the Razorpay dashboard, add a webhook to `https://<tunnel>/v1/webhooks/razorpay` for `payment.authorized`, `payment.captured`, `payment.failed` and `order.paid`, and put its secret in `RAZORPAY_WEBHOOK_SECRET`. Pay, close the tab before the confirmation, and watch the webhook settle it.
 
 | Endpoint                                  | Who                                                           |
 | ----------------------------------------- | ------------------------------------------------------------- |
 | `GET /v1/checkout/{id}?client_secret=...` | the customer's browser: amount, merchant name, Razorpay order |
 | `POST /v1/checkout/{id}/confirm`          | the customer's browser: Razorpay's signed result              |
 | `POST /v1/payment_intents/{id}/sync`      | the merchant (`payments:write`): ask Razorpay now             |
+| `POST /v1/webhooks/razorpay`              | Razorpay, signed with the webhook secret                      |
 
 The API tests run against an in-memory fake of Razorpay's API, so they need no keys and never call Razorpay. The checkout's tests (React Testing Library) stand in for Razorpay's window.
 
