@@ -1,10 +1,42 @@
 import { createApp, ensureIndexes } from "./app.js";
 import { loadConfig } from "./config.js";
 import { connectMongo } from "./db.js";
-import { createLogger } from "./logger.js";
+import { createLogger, type Logger } from "./logger.js";
+import { createGateways, reconcile, type CheckoutDeps } from "./payments/checkout.js";
 import { createRedis } from "./redis.js";
 
 const SHUTDOWN_GRACE_MS = 10_000;
+
+/**
+ * Every interval, asks Razorpay about payments whose webhook hasn't arrived. Runs one pass
+ * at a time (the next is scheduled only when the previous finishes). With several server
+ * instances each would run it; that's safe, since every update it makes is conditional and
+ * idempotent, just redundant. Returns a function that stops it.
+ */
+function startReconciler(
+  deps: CheckoutDeps,
+  logger: Logger,
+  intervalSeconds: number,
+  afterSeconds: number,
+): () => void {
+  if (intervalSeconds === 0 || (!deps.gateways.test && !deps.gateways.live)) return () => undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let stopped = false;
+  const tick = async () => {
+    try {
+      const result = await reconcile(deps, { afterSeconds });
+      if (result.checked > 0) logger.info(result, "Reconciled payments with Razorpay");
+    } catch (err) {
+      logger.error({ err }, "Reconciliation pass failed");
+    }
+    if (!stopped) timer = setTimeout(() => void tick(), intervalSeconds * 1000).unref();
+  };
+  timer = setTimeout(() => void tick(), intervalSeconds * 1000).unref();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
 
 async function main(): Promise<void> {
   try {
@@ -24,6 +56,18 @@ async function main(): Promise<void> {
   const app = createApp({ config, logger, mongo, redis });
   // Unique indexes enforce rules like "one account per email", so they must exist first
   await ensureIndexes(app.locals.models);
+  const stopReconciler = startReconciler(
+    {
+      mongo,
+      models: app.locals.models,
+      feeBasisPoints: config.platformFeeBps,
+      gateways: createGateways(config),
+      logger,
+    },
+    logger,
+    config.reconcile.intervalSeconds,
+    config.reconcile.afterSeconds,
+  );
   const server = app.listen(config.port, () => {
     logger.info({ port: config.port, env: config.nodeEnv }, "PayGuard API listening");
   });
@@ -33,6 +77,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, "Shutting down");
+    stopReconciler();
     // Stop taking new connections, let in-flight requests finish, then close the databases
     const force = setTimeout(() => {
       logger.error("Requests still running after the grace period, exiting anyway");

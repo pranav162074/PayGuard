@@ -20,11 +20,12 @@ import { failIntent, markProcessing, succeedIntent, type PaymentDeps } from "./s
  *    they never touch our servers.
  * 2. The customer pays: the browser sends back Razorpay's signed result. We check the
  *    signature, then ask Razorpay's API what actually happened.
+ * 3. Razorpay sends webhooks too, and a reconciler polls unfinished payments, so a customer
+ *    closing the tab at the wrong moment can't lose a payment.
  *
- * Everything that learns about a payment ends in syncIntent(), which treats Razorpay's API as
- * the source of truth and applies the result through the state machine. Running it twice, or
- * from two places at once, can't double-charge or double-post: the transitions and the
- * ledger are idempotent. (Razorpay's webhooks will call it too, in the next branch.)
+ * All three paths end in syncIntent(), which treats Razorpay's API as the source of truth and
+ * applies the result through the state machine. Running it twice, or from two paths at
+ * once, can't double-charge or double-post: the transitions and the ledger are idempotent.
  */
 
 export type Gateways = Record<KeyMode, RazorpayClient | null>;
@@ -155,7 +156,11 @@ async function applying(
  * - nothing yet: no change.
  * Throws GatewayError when Razorpay can't be asked.
  */
-export async function syncIntent(deps: CheckoutDeps, intentId: string): Promise<PaymentIntent> {
+export async function syncIntent(
+  deps: CheckoutDeps,
+  intentId: string,
+  options: { now?: Date } = {},
+): Promise<PaymentIntent> {
   const intent = await reload(deps, intentId);
   const orderId = intent.gateway?.orderId;
   if (!orderId || intent.status === "succeeded") return intent;
@@ -164,7 +169,7 @@ export async function syncIntent(deps: CheckoutDeps, intentId: string): Promise<
   const payments = newestFirst(await client.orderPayments(orderId));
   await deps.models.PaymentIntent.updateOne(
     { _id: intentId },
-    { $set: { "gateway.checkedAt": new Date() } },
+    { $set: { "gateway.checkedAt": options.now ?? new Date() } },
   );
 
   let captured = payments.find((p) => p.status === "captured" || p.status === "refunded");
@@ -207,4 +212,44 @@ export async function syncIntent(deps: CheckoutDeps, intentId: string): Promise<
     return applying(deps, intentId, () => failIntent(deps, intentId, reason));
   }
   return reload(deps, intentId);
+}
+
+export type ReconcileResult = { checked: number; changed: number; errors: number };
+
+/**
+ * Catches payments whose webhook never came (Razorpay down, our server down, a tunnel that
+ * closed). Looks at unfinished intents with a gateway order that haven't changed or been
+ * checked for `afterSeconds`, oldest check first, a batch at a time.
+ */
+export async function reconcile(
+  deps: CheckoutDeps,
+  options: { afterSeconds: number; batchSize?: number; now?: Date },
+): Promise<ReconcileResult> {
+  const now = options.now ?? new Date();
+  const cutoff = new Date(now.getTime() - options.afterSeconds * 1000);
+  // Orders older than a day are abandoned carts; stop asking about them
+  const oldest = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const due = await deps.models.PaymentIntent.find({
+    status: { $in: ["requires_payment", "processing", "failed"] },
+    "gateway.orderId": { $type: "string" },
+    createdAt: { $gte: oldest },
+    updatedAt: { $lt: cutoff },
+    $or: [{ "gateway.checkedAt": null }, { "gateway.checkedAt": { $lt: cutoff } }],
+  })
+    .sort({ "gateway.checkedAt": 1 })
+    .limit(options.batchSize ?? 50)
+    .lean<PaymentIntent[]>();
+
+  const result: ReconcileResult = { checked: 0, changed: 0, errors: 0 };
+  for (const intent of due) {
+    result.checked += 1;
+    try {
+      const after = await syncIntent(deps, intent._id, { now });
+      if (after.status !== intent.status) result.changed += 1;
+    } catch (err) {
+      result.errors += 1;
+      deps.logger.warn({ err, intentId: intent._id }, "Reconciling a payment failed");
+    }
+  }
+  return result;
 }

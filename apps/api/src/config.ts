@@ -60,10 +60,16 @@ const schema = z.object({
     .regex(/^rzp_live_\w+$/, "Must start with rzp_live_")
     .optional(),
   RAZORPAY_LIVE_KEY_SECRET: z.string().min(8).optional(),
+  // Set in the Razorpay dashboard when adding the webhook; signs every webhook body
+  RAZORPAY_WEBHOOK_SECRET: z.string().min(8).optional(),
   RAZORPAY_API_URL: z.url({ protocol: /^https?$/ }).default("https://api.razorpay.com/v1"),
   // Where the hosted checkout app (apps/checkout) is served, for the checkout links we give
   // merchants
   CHECKOUT_URL: z.url({ protocol: /^https?$/ }).default("http://localhost:5174"),
+  // How often to ask Razorpay about payments whose webhook hasn't arrived (0 turns it off),
+  // and how old an unfinished payment must be before we ask
+  RECONCILE_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
+  RECONCILE_AFTER_SECONDS: z.coerce.number().int().min(10).max(86_400).default(120),
 });
 
 export type GatewayKeys = { keyId: string; keySecret: string };
@@ -92,9 +98,11 @@ export type Config = {
     /** Keys per mode; null when that mode can't take payments. */
     test: GatewayKeys | null;
     live: GatewayKeys | null;
+    webhookSecret: string | null;
     apiUrl: string;
   };
   checkoutUrl: string;
+  reconcile: { intervalSeconds: number; afterSeconds: number };
   /** Refresh-token cookies are Secure (HTTPS only) everywhere except local development and tests. */
   secureCookies: boolean;
 };
@@ -139,6 +147,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       );
     }
   }
+  if (c.RAZORPAY_LIVE_KEY_ID && !c.RAZORPAY_WEBHOOK_SECRET) {
+    // Without webhooks, a live payment whose customer closes the tab is only noticed by the
+    // reconciler; with real money that delay isn't acceptable
+    throw new ConfigError(
+      "Invalid configuration:\n  RAZORPAY_WEBHOOK_SECRET: Required when live keys are set",
+    );
+  }
   const keys = (keyId?: string, keySecret?: string): GatewayKeys | null =>
     keyId && keySecret ? { keyId, keySecret } : null;
   return {
@@ -164,9 +179,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     razorpay: {
       test: keys(c.RAZORPAY_TEST_KEY_ID, c.RAZORPAY_TEST_KEY_SECRET),
       live: keys(c.RAZORPAY_LIVE_KEY_ID, c.RAZORPAY_LIVE_KEY_SECRET),
+      webhookSecret: c.RAZORPAY_WEBHOOK_SECRET ?? null,
       apiUrl: c.RAZORPAY_API_URL.replace(/\/+$/, ""),
     },
     checkoutUrl: c.CHECKOUT_URL.replace(/\/+$/, ""),
+    reconcile: {
+      intervalSeconds: c.RECONCILE_INTERVAL_SECONDS,
+      afterSeconds: c.RECONCILE_AFTER_SECONDS,
+    },
     secureCookies: c.NODE_ENV === "production",
   };
 }

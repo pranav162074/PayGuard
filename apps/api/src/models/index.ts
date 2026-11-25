@@ -8,9 +8,11 @@ import {
   type LedgerPosting,
 } from "../ledger/models.js";
 import {
+  gatewayWebhookSchema,
   idempotencyRecordSchema,
   paymentEventSchema,
   paymentIntentSchema,
+  type GatewayWebhook,
   type IdempotencyRecord,
   type PaymentEvent,
   type PaymentIntent,
@@ -168,6 +170,11 @@ export function registerModels(connection: Connection): Models {
       "IdempotencyRecord",
       idempotencyRecordSchema,
       "idempotency_keys",
+    ),
+    GatewayWebhook: connection.model<GatewayWebhook>(
+      "GatewayWebhook",
+      gatewayWebhookSchema,
+      "gateway_webhooks",
     ),
     LedgerPosting: connection.model<LedgerPosting>(
       "LedgerPosting",

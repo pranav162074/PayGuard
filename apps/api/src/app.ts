@@ -24,6 +24,7 @@ import { ledgerRouter } from "./routes/ledger.js";
 import { meRouter } from "./routes/me.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { teamRouter } from "./routes/team.js";
+import { webhooksRouter } from "./routes/webhooks.js";
 
 export type AppDeps = {
   config: Config;
@@ -76,6 +77,8 @@ export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: 
   app.use(helmet());
   // Only the dashboard's origins may call the API from a browser, with cookies
   app.use(cors({ origin: config.corsOrigins, credentials: true }));
+  // Before the JSON parser: webhook signatures cover the raw bytes
+  app.use(webhooksRouter(deps));
   app.use(express.json({ limit: config.jsonBodyLimit }));
   app.use(cookieParser());
 
