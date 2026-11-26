@@ -10,12 +10,14 @@ import {
 import {
   gatewayWebhookSchema,
   idempotencyRecordSchema,
+  refundSchema,
   paymentEventSchema,
   paymentIntentSchema,
   type GatewayWebhook,
   type IdempotencyRecord,
   type PaymentEvent,
   type PaymentIntent,
+  type Refund,
   type PaymentModels,
 } from "../payments/models.js";
 import { Schema, type Connection, type InferSchemaType, type Model, type Types } from "mongoose";
@@ -176,6 +178,7 @@ export function registerModels(connection: Connection): Models {
       gatewayWebhookSchema,
       "gateway_webhooks",
     ),
+    Refund: connection.model<Refund>("Refund", refundSchema, "refunds"),
     LedgerPosting: connection.model<LedgerPosting>(
       "LedgerPosting",
       ledgerPostingSchema,

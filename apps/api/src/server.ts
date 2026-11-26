@@ -3,12 +3,13 @@ import { loadConfig } from "./config.js";
 import { connectMongo } from "./db.js";
 import { createLogger, type Logger } from "./logger.js";
 import { createGateways, reconcile, type CheckoutDeps } from "./payments/checkout.js";
+import { reconcileRefunds } from "./payments/refunds.js";
 import { createRedis } from "./redis.js";
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
 /**
- * Every interval, asks Razorpay about payments whose webhook hasn't arrived. Runs one pass
+ * Every interval, asks Razorpay about payments and refunds whose webhook hasn't arrived. Runs one pass
  * at a time (the next is scheduled only when the previous finishes). With several server
  * instances each would run it; that's safe, since every update it makes is conditional and
  * idempotent, just redundant. Returns a function that stops it.
@@ -26,6 +27,8 @@ function startReconciler(
     try {
       const result = await reconcile(deps, { afterSeconds });
       if (result.checked > 0) logger.info(result, "Reconciled payments with Razorpay");
+      const refunds = await reconcileRefunds(deps, { afterSeconds });
+      if (refunds.checked > 0) logger.info(refunds, "Reconciled refunds with Razorpay");
     } catch (err) {
       logger.error({ err }, "Reconciliation pass failed");
     }

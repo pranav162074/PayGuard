@@ -8,7 +8,8 @@ import { MAX_AMOUNT } from "../ledger/money.js";
 import { authenticate, principalOf, requirePermission } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { KEY_MODES, type KeyMode } from "../models/index.js";
-import type { PaymentIntent } from "../payments/models.js";
+import { REFUND_REASONS, refundedOf, type PaymentIntent, type Refund } from "../payments/models.js";
+import { createRefund } from "../payments/refunds.js";
 import {
   cancelIntent,
   createIntent,
@@ -56,6 +57,48 @@ const listQuery = z.object({
   starting_after: z.string().optional(),
 });
 
+const refundBody = z.strictObject({
+  // Leave out to refund everything not yet refunded
+  amount: z
+    .number()
+    .int("Use whole paise: 500 means ₹5.00")
+    .min(MIN_AMOUNT, `At least ${MIN_AMOUNT} paise (₹1)`)
+    .max(MAX_AMOUNT)
+    .optional(),
+  reason: z.enum(REFUND_REASONS).default("requested_by_customer"),
+  note: z.string().trim().max(500).optional(),
+});
+
+const refundListQuery = z.object({
+  mode: z.enum(KEY_MODES).optional(),
+  payment_intent: z.string().max(40).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+export function refundJson(refund: Refund) {
+  return {
+    id: refund._id,
+    object: "refund",
+    payment_intent: refund.paymentIntentId,
+    amount: refund.amount,
+    currency: refund.currency,
+    fee_returned: refund.feeReturned,
+    reason: refund.reason,
+    note: refund.note,
+    status: refund.status,
+    failure_reason: refund.failureReason,
+    mode: refund.mode,
+    gateway: {
+      provider: refund.gateway?.provider ?? "none",
+      refund_id: refund.gateway?.refundId ?? null,
+    },
+    ledger_entry_id: refund.ledgerEntryId?.toString() ?? null,
+    reversal_entry_id: refund.reversalEntryId?.toString() ?? null,
+    created_at: refund.createdAt,
+    succeeded_at: refund.succeededAt,
+  };
+}
+
 const testActionBody = z.strictObject({
   outcome: z.enum(["succeed", "fail"]),
   failure_reason: z.string().max(200).optional(),
@@ -91,6 +134,9 @@ export function intentJson(intent: PaymentIntent, checkoutUrl: string) {
     net: typeof intent.fee === "number" ? intent.amount - intent.fee : null,
     failure_reason: intent.failureReason,
     ledger_entry_id: intent.ledgerEntryId?.toString() ?? null,
+    // Includes refunds still in progress
+    amount_refunded: refundedOf(intent),
+    refunded: refundedOf(intent) === intent.amount,
     // Give these to the customer's browser: the hosted page, or your own page using the
     // secret with GET /v1/checkout/{id}
     client_secret: intent.clientSecret,
@@ -119,6 +165,7 @@ export function paymentsRouter(deps: RouteDeps): Router {
   const checkout: CheckoutDeps = { ...payments, gateways: deps.gateways, logger };
   const router = Router();
   router.use("/v1/payment_intents", authenticate(deps));
+  router.use("/v1/refunds", authenticate(deps));
   const write = [requirePermission("payments:write"), idempotency(models, logger)];
 
   /** Scoped to the caller's merchant and mode: anything else is "not found". */
@@ -211,6 +258,61 @@ export function paymentsRouter(deps: RouteDeps): Router {
       });
     },
   );
+
+  /**
+   * Refund all or part of a succeeded payment. Safe to retry with an Idempotency-Key, and
+   * safe to race: refunds can never add up to more than the payment.
+   */
+  router.post("/v1/payment_intents/:id/refunds", ...write, async (req, res) => {
+    const body = parse(refundBody, req.body);
+    const intent = await load(req);
+    const refund = await createRefund(checkout, intent._id, {
+      amount: body.amount,
+      reason: body.reason,
+      note: body.note,
+    });
+    res.status(201).json(refundJson(refund));
+  });
+
+  router.get(
+    "/v1/payment_intents/:id/refunds",
+    requirePermission("payments:read"),
+    async (req, res) => {
+      const intent = await load(req);
+      const refunds = await models.Refund.find({ paymentIntentId: intent._id })
+        .sort({ createdAt: 1, _id: 1 })
+        .lean<Refund[]>();
+      res.json({ object: "list", data: refunds.map(refundJson) });
+    },
+  );
+
+  router.get("/v1/refunds", requirePermission("payments:read"), async (req, res) => {
+    const query = parse(refundListQuery, req.query);
+    const filter: Record<string, unknown> = {
+      merchantId: principalOf(req).merchantId,
+      mode: modeOf(req),
+    };
+    if (query.payment_intent) filter.paymentIntentId = query.payment_intent;
+    const rows = await models.Refund.find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(query.limit + 1)
+      .lean<Refund[]>();
+    res.json({
+      object: "list",
+      data: rows.slice(0, query.limit).map(refundJson),
+      has_more: rows.length > query.limit,
+    });
+  });
+
+  router.get("/v1/refunds/:id", requirePermission("payments:read"), async (req, res) => {
+    const refund = await models.Refund.findOne({
+      _id: req.params.id,
+      merchantId: principalOf(req).merchantId,
+      mode: modeOf(req),
+    }).lean<Refund>();
+    if (!refund) throw new ApiError(404, "not_found", "Refund not found");
+    res.json(refundJson(refund));
+  });
 
   router.post("/v1/payment_intents/:id/cancel", ...write, async (req, res) => {
     const intent = await load(req);

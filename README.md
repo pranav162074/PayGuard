@@ -167,6 +167,34 @@ Live keys need `RAZORPAY_WEBHOOK_SECRET`; the server refuses to start without it
 
 The API tests run against an in-memory fake of Razorpay's API, so they need no keys and never call Razorpay. The checkout's tests (React Testing Library) stand in for Razorpay's window.
 
+## Refunds
+
+A succeeded payment can be refunded in full or in parts, until the refunds add up to the payment:
+
+```bash
+curl -X POST localhost:4000/v1/payment_intents/pi_.../refunds \
+  -H "Authorization: Bearer sk_test_..." -H "Idempotency-Key: refund-order-1001" \
+  -H "Content-Type: application/json" -d '{"amount": 20000, "reason": "requested_by_customer"}'
+```
+
+Leave out `amount` to refund whatever is left. Reasons: `requested_by_customer`, `duplicate`, `fraudulent`, `other`.
+
+How it stays correct:
+
+- **Never more than was paid, even under races.** Creating a refund reserves its amount on the payment with one conditional update (`amount_refunded <= amount - refund`) inside a MongoDB transaction. Ten parallel refunds of ₹100 on a ₹500 payment: exactly five succeed (there's a test for that).
+- **Ledger first, gateway second.** The same transaction takes the money out of `merchant_payable` (which refuses to go negative) and records a `refund.created` event. Only after it commits is Razorpay asked to send the money.
+- **Our fee goes back proportionally**, rounded down, and the refund that completes the payment returns whatever is left, so a fully refunded payment returns exactly its whole fee.
+- **Failures are reversed, not edited.** If Razorpay refuses the refund or the bank fails it, a compensating transaction marks it `failed`, frees the reserved amount and posts a reversing ledger entry. Ledger entries are never changed.
+- **No double refunds.** Each refund carries our id (`re_...`) in Razorpay's notes. If Razorpay was unreachable, or did the refund but its response got lost, the refund stays `pending`; the reconciler (and Razorpay's `refund.*` webhooks) first look for it at Razorpay by that id and create it only if it really isn't there.
+
+Statuses: `pending` → `succeeded` or `failed`. Test-mode payments completed with `test_actions` never touched Razorpay, so their refunds succeed at once. Events: `refund.created`, `refund.succeeded`, `refund.failed`, and `payment_intent.refunded` once a payment is fully refunded.
+
+| Endpoint                                                              | Needs            |
+| --------------------------------------------------------------------- | ---------------- |
+| `POST /v1/payment_intents/{id}/refunds`                               | `payments:write` |
+| `GET /v1/payment_intents/{id}/refunds`                                | `payments:read`  |
+| `GET /v1/refunds` (`payment_intent`, `limit`), `GET /v1/refunds/{id}` | `payments:read`  |
+
 ## Ledger
 
 Every movement of money is recorded in a double-entry ledger, kept separately per merchant and per mode (test and live).

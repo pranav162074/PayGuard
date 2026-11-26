@@ -5,18 +5,22 @@ import express, { Router } from "express";
 import { ApiError } from "../errors.js";
 import { verifyWebhookSignature } from "../gateway/razorpay.js";
 import { syncIntent, type CheckoutDeps } from "../payments/checkout.js";
-import type { PaymentIntent } from "../payments/models.js";
+import type { PaymentIntent, Refund } from "../payments/models.js";
+import { syncRefund } from "../payments/refunds.js";
 import { isDuplicateKey } from "../validation.js";
 import type { RouteDeps } from "./deps.js";
 
 /** Events that can change a payment. Everything else is acknowledged and ignored. */
 const HANDLED = new Set(["payment.authorized", "payment.captured", "payment.failed", "order.paid"]);
+/** Events that can finish a refund. */
+const REFUND_EVENTS = new Set(["refund.created", "refund.processed", "refund.failed"]);
 
 type RazorpayWebhook = {
   event?: string;
   payload?: {
     payment?: { entity?: { id?: string; order_id?: string | null } };
     order?: { entity?: { id?: string } };
+    refund?: { entity?: { id?: string; notes?: Record<string, string> | [] | null } };
   };
 };
 
@@ -93,6 +97,37 @@ export function webhooksRouter(deps: RouteDeps): Router {
 
       const finish = (status: "processed" | "ignored" | "failed", error: string | null = null) =>
         models.GatewayWebhook.updateOne({ _id: eventId }, { $set: { status, error } });
+
+      if (REFUND_EVENTS.has(type)) {
+        // Ours if Razorpay's id is recorded, or if the notes carry our id (a refund whose
+        // creation response we never got)
+        const entity = event.payload?.refund?.entity;
+        const ourId =
+          entity?.notes && !Array.isArray(entity.notes) ? entity.notes.payguard_refund : undefined;
+        const or: Record<string, string>[] = [];
+        if (entity?.id) or.push({ "gateway.refundId": entity.id });
+        if (ourId) or.push({ _id: ourId });
+        const refund = or.length ? await models.Refund.findOne({ $or: or }).lean<Refund>() : null;
+        if (!refund) {
+          await finish("ignored");
+          res.json({ received: true });
+          return;
+        }
+        try {
+          const updated = await syncRefund(checkout, refund._id);
+          await finish("processed");
+          logger.info(
+            { eventId, type, refundId: refund._id, status: updated.status },
+            "Razorpay refund webhook handled",
+          );
+          res.json({ received: true });
+        } catch (err) {
+          await finish("failed", err instanceof Error ? err.message : String(err));
+          logger.error({ err, eventId, type, refundId: refund._id }, "Razorpay webhook failed");
+          res.status(500).json({ error: { code: "webhook_failed", message: "Try again later" } });
+        }
+        return;
+      }
 
       const intent =
         HANDLED.has(type) && orderId
