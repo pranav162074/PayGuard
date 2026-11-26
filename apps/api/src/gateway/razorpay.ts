@@ -29,6 +29,16 @@ export type RazorpayPayment = {
   error_description: string | null;
 };
 
+export type RazorpayRefund = {
+  id: string;
+  payment_id: string;
+  amount: number;
+  currency: string;
+  /** Refunds in test mode are processed at once; live ones can stay pending for days. */
+  status: "pending" | "processed" | "failed";
+  notes: Record<string, string> | [] | null;
+};
+
 export class GatewayError extends Error {
   override name = "GatewayError";
 
@@ -107,6 +117,30 @@ export class RazorpayClient {
       `/orders/${encodeURIComponent(orderId)}/payments`,
     );
     return page.items;
+  }
+
+  /** Refunds part or all of a captured payment. */
+  createRefund(
+    paymentId: string,
+    input: { amount: number; notes: Record<string, string>; receipt: string },
+  ): Promise<RazorpayRefund> {
+    return this.call<RazorpayRefund>("POST", `/payments/${encodeURIComponent(paymentId)}/refund`, {
+      ...input,
+      speed: "normal",
+    });
+  }
+
+  /** Every refund of a payment: used to find one we created but didn't get to record. */
+  async paymentRefunds(paymentId: string): Promise<RazorpayRefund[]> {
+    const page = await this.call<{ items: RazorpayRefund[] }>(
+      "GET",
+      `/payments/${encodeURIComponent(paymentId)}/refunds?count=100`,
+    );
+    return page.items;
+  }
+
+  getRefund(refundId: string): Promise<RazorpayRefund> {
+    return this.call<RazorpayRefund>("GET", `/refunds/${encodeURIComponent(refundId)}`);
   }
 
   /** Captures an authorized payment (only needed when the account doesn't auto-capture). */

@@ -6,6 +6,11 @@ import { CURRENCIES } from "../ledger/money.js";
 import { KEY_MODES } from "../models/constants.js";
 import { PAYMENT_STATUSES } from "./stateMachine.js";
 
+/** Payments created before refunds existed have no amountRefunded on disk: that means 0. */
+export function refundedOf(intent: Pick<PaymentIntent, "amountRefunded">): number {
+  return (intent as { amountRefunded?: number }).amountRefunded ?? 0;
+}
+
 /** Public ids carry their type, like Stripe's: "pi_..." is obviously a payment intent. */
 export function newId(prefix: string): string {
   return `${prefix}_${randomBytes(12).toString("hex")}`;
@@ -29,6 +34,9 @@ export const paymentIntentSchema = new Schema(
     },
     metadata: { type: Map, of: String, default: {} },
     fee: { type: Number, default: null }, // our fee, set when the payment succeeds
+    // Refunded so far, including refunds still in progress: reserved atomically when a refund
+    // starts, so concurrent refunds can never add up to more than the payment
+    amountRefunded: { type: Number, required: true, default: 0 },
     failureReason: { type: String, default: null },
     ledgerEntryId: { type: Schema.Types.ObjectId, ref: "LedgerEntry", default: null },
     // Lets the customer's browser load and pay this one intent on the hosted checkout, and
@@ -86,6 +94,54 @@ export const paymentEventSchema = new Schema(
 paymentEventSchema.index({ paymentIntentId: 1, createdAt: 1 });
 paymentEventSchema.index({ merchantId: 1, mode: 1, createdAt: -1 });
 
+export const REFUND_STATUSES = ["pending", "succeeded", "failed"] as const;
+export type RefundStatus = (typeof REFUND_STATUSES)[number];
+export const REFUND_REASONS = [
+  "requested_by_customer",
+  "duplicate",
+  "fraudulent",
+  "other",
+] as const;
+
+/**
+ * Money going back to a customer. Its amount is reserved on the payment and taken out of the
+ * merchant's balance (one ledger entry) the moment it's created; if the gateway then fails
+ * it, both are undone (a reversing entry), so the books never show money that didn't move.
+ */
+export const refundSchema = new Schema(
+  {
+    _id: { type: String, default: () => newId("re") },
+    merchantId: { type: Schema.Types.ObjectId, ref: "Merchant", required: true },
+    mode: { type: String, enum: KEY_MODES, required: true },
+    paymentIntentId: { type: String, required: true },
+    amount: { type: Number, required: true }, // paise
+    currency: { type: String, enum: CURRENCIES, required: true },
+    // Our share of the processing fee given back with this refund (see refundLines)
+    feeReturned: { type: Number, required: true },
+    reason: { type: String, enum: REFUND_REASONS, required: true },
+    note: { type: String, default: null },
+    status: { type: String, enum: REFUND_STATUSES, required: true },
+    failureReason: { type: String, default: null },
+    gateway: {
+      provider: { type: String, enum: ["razorpay", "none"], required: true },
+      refundId: { type: String, default: null }, // rfnd_...
+      checkedAt: { type: Date, default: null },
+    },
+    ledgerEntryId: { type: Schema.Types.ObjectId, ref: "LedgerEntry", default: null },
+    reversalEntryId: { type: Schema.Types.ObjectId, ref: "LedgerEntry", default: null },
+    succeededAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+refundSchema.index({ paymentIntentId: 1, createdAt: 1 });
+refundSchema.index({ merchantId: 1, mode: 1, createdAt: -1, _id: -1 });
+refundSchema.index(
+  { "gateway.refundId": 1 },
+  { unique: true, partialFilterExpression: { "gateway.refundId": { $type: "string" } } },
+);
+// The reconciler's query: refunds the gateway hasn't finished
+refundSchema.index({ status: 1, "gateway.checkedAt": 1 });
+
 /** Stored responses for Idempotency-Key requests (see middleware/idempotency.ts). */
 export const idempotencyRecordSchema = new Schema(
   {
@@ -129,12 +185,14 @@ export type PaymentIntent = InferSchemaType<typeof paymentIntentSchema> & { _id:
 export type PaymentEvent = InferSchemaType<typeof paymentEventSchema> & { _id: string };
 export type IdempotencyRecord = InferSchemaType<typeof idempotencyRecordSchema> & { _id: string };
 export type GatewayWebhook = InferSchemaType<typeof gatewayWebhookSchema> & { _id: string };
+export type Refund = InferSchemaType<typeof refundSchema> & { _id: string };
 
 export type PaymentModels = {
   PaymentIntent: Model<PaymentIntent>;
   PaymentEvent: Model<PaymentEvent>;
   IdempotencyRecord: Model<IdempotencyRecord>;
   GatewayWebhook: Model<GatewayWebhook>;
+  Refund: Model<Refund>;
 };
 
 export type { Types };

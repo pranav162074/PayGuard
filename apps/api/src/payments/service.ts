@@ -78,6 +78,7 @@ export async function createIntent(
     | "canceledAt"
     | "clientSecret"
     | "gateway"
+    | "amountRefunded"
   >,
 ): Promise<PaymentIntent> {
   let created: PaymentIntent | undefined;
