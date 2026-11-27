@@ -7,6 +7,7 @@ import { refundLines } from "../ledger/templates.js";
 import type { Models } from "../models/index.js";
 import type { CheckoutDeps } from "./checkout.js";
 import { newId, refundedOf, type PaymentIntent, type Refund, type RefundStatus } from "./models.js";
+import { intentObject, refundJson as refundObject } from "./serialize.js";
 
 /**
  * Refunds, safe under concurrency and partial failure.
@@ -38,6 +39,7 @@ async function recordEvent(
   refund: Refund,
   type: string,
   extra: Record<string, unknown> = {},
+  object: Record<string, unknown> = refundObject(refund),
 ): Promise<void> {
   await models.PaymentEvent.create(
     [
@@ -52,6 +54,7 @@ async function recordEvent(
           amount: refund.amount,
           currency: refund.currency,
           ...extra,
+          object,
         },
       },
     ],
@@ -295,9 +298,14 @@ async function succeedRefund(
       refundedOf(intent) === intent.amount &&
       (await allRefundsSettled(deps.models, session, intent._id))
     ) {
-      await recordEvent(deps.models, session, done, "payment_intent.refunded", {
-        payment_amount: intent.amount,
-      });
+      await recordEvent(
+        deps.models,
+        session,
+        done,
+        "payment_intent.refunded",
+        { payment_amount: intent.amount },
+        intentObject(intent),
+      );
     }
   });
   return reloadRefund(deps.models, refundId);

@@ -24,7 +24,11 @@ import { ledgerRouter } from "./routes/ledger.js";
 import { meRouter } from "./routes/me.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { teamRouter } from "./routes/team.js";
+import { webhookEndpointsRouter } from "./routes/webhookEndpoints.js";
 import { webhooksRouter } from "./routes/webhooks.js";
+import type { WebhookDeps } from "./webhooks/delivery.js";
+import { createWebhookQueue } from "./webhooks/queue.js";
+import { createWebhookAgent, systemLookup, type Lookup } from "./webhooks/ssrf.js";
 
 export type AppDeps = {
   config: Config;
@@ -35,13 +39,25 @@ export type AppDeps = {
   now?: () => number;
   /** How the app reaches Razorpay; tests pass a fake. */
   razorpayFetch?: Fetch;
+  /** DNS for webhook URLs; tests pass a fake to play private and rebinding hosts. */
+  webhookLookup?: Lookup;
 };
 
-export type App = Express & { locals: { models: Models } };
+export type App = Express & {
+  locals: { models: Models; webhooks: WebhookDeps & { close: () => Promise<void> } };
+};
 
 export { ensureIndexes };
 
-export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: AppDeps): App {
+export function createApp({
+  config,
+  logger,
+  mongo,
+  redis,
+  now,
+  razorpayFetch,
+  webhookLookup = systemLookup,
+}: AppDeps): App {
   const app = express() as App;
   app.disable("x-powered-by");
   // Behind a proxy, take the client IP from X-Forwarded-For, trusting only that many hops
@@ -49,6 +65,20 @@ export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: 
 
   const models = registerModels(mongo);
   app.locals.models = models;
+  const webhookQueue = createWebhookQueue(config);
+  const agent = createWebhookAgent({
+    allowPrivate: config.webhooks.allowPrivateUrls,
+    lookup: webhookLookup,
+    timeoutMs: config.webhooks.timeoutMs,
+  });
+  const webhooks: WebhookDeps = { config, logger, models, queue: webhookQueue, agent };
+  app.locals.webhooks = {
+    ...webhooks,
+    close: async () => {
+      await webhookQueue.close();
+      await agent.close();
+    },
+  };
   const deps: RouteDeps = {
     config,
     logger,
@@ -56,6 +86,8 @@ export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: 
     models,
     rateLimiter: new RateLimiter(redis, logger, now),
     gateways: createGateways(config, razorpayFetch),
+    webhooks,
+    lookup: webhookLookup,
   };
 
   app.use(requestId);
@@ -96,6 +128,7 @@ export function createApp({ config, logger, mongo, redis, now, razorpayFetch }: 
   app.use(ledgerRouter(deps));
   app.use(paymentsRouter(deps));
   app.use(checkoutRouter(deps));
+  app.use(webhookEndpointsRouter(deps));
 
   app.use(notFound);
   app.use(errorHandler(logger));

@@ -20,6 +20,13 @@ import {
   type Refund,
   type PaymentModels,
 } from "../payments/models.js";
+import {
+  webhookDeliverySchema,
+  webhookEndpointSchema,
+  type WebhookDelivery,
+  type WebhookEndpoint,
+  type WebhookModels,
+} from "../webhooks/models.js";
 import { Schema, type Connection, type InferSchemaType, type Model, type Types } from "mongoose";
 
 import { KEY_MODES, ROLES, type KeyMode, type Role } from "./constants.js";
@@ -130,7 +137,8 @@ export type RefreshToken = InferSchemaType<typeof refreshTokenSchema> & { _id: T
 export type ApiKey = InferSchemaType<typeof apiKeySchema> & { _id: Types.ObjectId };
 
 export type Models = LedgerModels &
-  PaymentModels & {
+  PaymentModels &
+  WebhookModels & {
     User: Model<User>;
     Merchant: Model<Merchant>;
     Membership: Model<Membership>;
@@ -179,6 +187,16 @@ export function registerModels(connection: Connection): Models {
       "gateway_webhooks",
     ),
     Refund: connection.model<Refund>("Refund", refundSchema, "refunds"),
+    WebhookEndpoint: connection.model<WebhookEndpoint>(
+      "WebhookEndpoint",
+      webhookEndpointSchema,
+      "webhook_endpoints",
+    ),
+    WebhookDelivery: connection.model<WebhookDelivery>(
+      "WebhookDelivery",
+      webhookDeliverySchema,
+      "webhook_deliveries",
+    ),
     LedgerPosting: connection.model<LedgerPosting>(
       "LedgerPosting",
       ledgerPostingSchema,

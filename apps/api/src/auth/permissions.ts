@@ -8,6 +8,8 @@ export const PERMISSIONS = [
   "payments:read",
   "payments:write",
   "risk:review",
+  "webhooks:read",
+  "webhooks:manage",
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -19,8 +21,10 @@ export const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
     "api_keys:manage",
     "payments:read",
     "payments:write",
+    "webhooks:read",
+    "webhooks:manage",
   ]),
-  analyst: new Set(["team:read", "payments:read", "risk:review"]),
+  analyst: new Set(["team:read", "payments:read", "risk:review", "webhooks:read"]),
 };
 
 /** Server-to-server API keys can use the payments API, but never manage the account. */

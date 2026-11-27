@@ -9,6 +9,7 @@ import { loadConfig, type Config } from "../src/config.js";
 import { connectMongo } from "../src/db.js";
 import { createLogger, type Logger } from "../src/logger.js";
 import { createRedis } from "../src/redis.js";
+import type { Lookup } from "../src/webhooks/ssrf.js";
 
 /**
  * Tests use their own database (payguard_test) and Redis database 15, on the same servers as
@@ -57,6 +58,7 @@ export async function startTestApp(
     logger?: Logger;
     now?: () => number;
     razorpayFetch?: typeof fetch;
+    webhookLookup?: Lookup;
   } = {},
 ): Promise<TestApp> {
   const config = testConfig(options.config);
@@ -73,6 +75,7 @@ export async function startTestApp(
     redis,
     now: options.now,
     razorpayFetch: options.razorpayFetch,
+    webhookLookup: options.webhookLookup,
   });
   await ensureIndexes(app.locals.models);
   return {
@@ -81,6 +84,7 @@ export async function startTestApp(
     mongo,
     redis,
     close: async () => {
+      await app.locals.webhooks.close();
       await mongo.close();
       redis.disconnect();
     },

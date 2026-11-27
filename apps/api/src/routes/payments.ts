@@ -8,7 +8,8 @@ import { MAX_AMOUNT } from "../ledger/money.js";
 import { authenticate, principalOf, requirePermission } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { KEY_MODES, type KeyMode } from "../models/index.js";
-import { REFUND_REASONS, refundedOf, type PaymentIntent, type Refund } from "../payments/models.js";
+import { REFUND_REASONS, type PaymentIntent, type Refund } from "../payments/models.js";
+import { intentJson, refundJson } from "../payments/serialize.js";
 import { createRefund } from "../payments/refunds.js";
 import {
   cancelIntent,
@@ -75,30 +76,6 @@ const refundListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
-export function refundJson(refund: Refund) {
-  return {
-    id: refund._id,
-    object: "refund",
-    payment_intent: refund.paymentIntentId,
-    amount: refund.amount,
-    currency: refund.currency,
-    fee_returned: refund.feeReturned,
-    reason: refund.reason,
-    note: refund.note,
-    status: refund.status,
-    failure_reason: refund.failureReason,
-    mode: refund.mode,
-    gateway: {
-      provider: refund.gateway?.provider ?? "none",
-      refund_id: refund.gateway?.refundId ?? null,
-    },
-    ledger_entry_id: refund.ledgerEntryId?.toString() ?? null,
-    reversal_entry_id: refund.reversalEntryId?.toString() ?? null,
-    created_at: refund.createdAt,
-    succeeded_at: refund.succeededAt,
-  };
-}
-
 const testActionBody = z.strictObject({
   outcome: z.enum(["succeed", "fail"]),
   failure_reason: z.string().max(200).optional(),
@@ -111,50 +88,6 @@ function modeOf(req: Request): KeyMode {
 }
 
 /** Mongoose gives a Map on documents and a plain object on lean reads. */
-function metadataOf(intent: PaymentIntent): Record<string, string> {
-  const raw = intent.metadata as unknown as Map<string, string> | Record<string, string> | null;
-  if (!raw) return {};
-  return raw instanceof Map ? Object.fromEntries(raw) : { ...raw };
-}
-
-export function intentJson(intent: PaymentIntent, checkoutUrl: string) {
-  const checkoutOpen = intent.status === "requires_payment" || intent.status === "failed";
-  return {
-    id: intent._id,
-    object: "payment_intent",
-    amount: intent.amount,
-    currency: intent.currency,
-    status: intent.status,
-    mode: intent.mode,
-    description: intent.description,
-    receipt: intent.receipt,
-    customer: { email: intent.customer?.email ?? null, phone: intent.customer?.phone ?? null },
-    metadata: metadataOf(intent),
-    fee: intent.fee ?? null,
-    net: typeof intent.fee === "number" ? intent.amount - intent.fee : null,
-    failure_reason: intent.failureReason,
-    ledger_entry_id: intent.ledgerEntryId?.toString() ?? null,
-    // Includes refunds still in progress
-    amount_refunded: refundedOf(intent),
-    refunded: refundedOf(intent) === intent.amount,
-    // Give these to the customer's browser: the hosted page, or your own page using the
-    // secret with GET /v1/checkout/{id}
-    client_secret: intent.clientSecret,
-    checkout_url: checkoutOpen
-      ? `${checkoutUrl}/pay/${intent._id}?client_secret=${encodeURIComponent(intent.clientSecret)}`
-      : null,
-    gateway: {
-      provider: intent.gateway?.provider ?? null,
-      order_id: intent.gateway?.orderId ?? null,
-      payment_id: intent.gateway?.paymentId ?? null,
-      method: intent.gateway?.method ?? null,
-    },
-    created_at: intent.createdAt,
-    succeeded_at: intent.succeededAt,
-    canceled_at: intent.canceledAt,
-  };
-}
-
 export function paymentsRouter(deps: RouteDeps): Router {
   const { models, config, logger } = deps;
   const payments: PaymentDeps = {

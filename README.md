@@ -195,6 +195,60 @@ Statuses: `pending` → `succeeded` or `failed`. Test-mode payments completed wi
 | `GET /v1/payment_intents/{id}/refunds`                                | `payments:read`  |
 | `GET /v1/refunds` (`payment_intent`, `limit`), `GET /v1/refunds/{id}` | `payments:read`  |
 
+## Webhooks to merchants
+
+Merchants add HTTPS endpoints and choose events; PayGuard POSTs each event there, signed, retried until it gets a 2xx.
+
+```bash
+curl -X POST localhost:4000/v1/webhook_endpoints -H "Authorization: Bearer <dashboard access token>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://shop.example.com/payguard", "enabled_events": ["payment_intent.succeeded", "refund.succeeded"]}'
+```
+
+Events: `payment_intent.created`, `.processing`, `.succeeded`, `.payment_failed`, `.canceled`, `.refunded`, `refund.created`, `.succeeded`, `.failed`, or `"*"` for all. The response holds the signing secret (`whsec_...`), the only time it's shown; it's stored encrypted (AES-256-GCM, `WEBHOOK_SECRETS_KEY`).
+
+```json
+{ "id": "evt_...", "object": "event", "type": "payment_intent.succeeded", "created": 1764230400,
+  "livemode": false, "data": { "object": { "id": "pi_...", "object": "payment_intent", "status": "succeeded", ... } } }
+```
+
+`data.object` is the object **as it was when the event happened**, not when it's delivered (a retried `payment_intent.created` still says `requires_payment`). It never contains the client secret.
+
+**Verifying a delivery** (Stripe's scheme): `PayGuard-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">`. Compute it over the _raw_ body with your secret, compare in constant time, and refuse timestamps more than 5 minutes old (replays). [`verifySignature`](apps/api/src/webhooks/signing.ts) is the reference implementation. Deduplicate by event id (`PayGuard-Event-Id`): a delivery whose 2xx got lost is sent again.
+
+**How delivery stays reliable:**
+
+```
+payment change + payment_events row      one MongoDB transaction: the outbox
+      └─ dispatcher (polls)              one delivery per subscribed endpoint, queued in BullMQ
+            └─ worker                    signed POST, 10 s timeout, redirects not followed
+                  ├─ 2xx                 succeeded
+                  ├─ anything else       retry: random(0, min(6 h, 30 s × 2^n)), full jitter
+                  └─ last attempt (8th)  dead: the dead-letter queue, replayable
+```
+
+- **Nothing is lost or doubled by a crash.** An event is only marked dispatched after its deliveries are queued. A dispatcher that dies mid-event is taken over after a minute; the unique `(event, endpoint)` index keeps it to one delivery each, and the job id is the delivery id, so BullMQ keeps it to one job. Workers skip deliveries that already succeeded. Tested with two dispatchers at once and a simulated crash.
+- **Jitter** spreads retries out, so a merchant's server coming back up isn't hit by every retry at the same moment.
+- **Delivery logs:** every attempt's time, status code, duration, error and the start of the response body, for 30 days (`GET /v1/webhook_deliveries?endpoint=&status=dead`, `GET /v1/webhook_deliveries/{id}`).
+- **Replays:** `POST /v1/webhook_deliveries/{id}/retry`, or every dead delivery of an endpoint with `POST /v1/webhook_endpoints/{id}/retry_dead`.
+- **Secret rotation without downtime:** `POST /v1/webhook_endpoints/{id}/rotate_secret` returns a new secret; for `expire_previous_in_hours` (default 24) deliveries carry a `v1=` signature for both, so the merchant can switch over at their own pace.
+- **Test pings:** `POST /v1/webhook_endpoints/{id}/test` sends a `ping` event, once.
+
+**SSRF protection.** A webhook URL is a way to make our servers send requests wherever a merchant likes, including the cloud metadata service and our own Redis. So:
+
+1. When an endpoint is saved, the URL must be `https://` (in production), without credentials, and its host must resolve **only** to public addresses: loopback, private, link-local (169.254.169.254), carrier-grade NAT, IPv6 unique-local, and IPv4-mapped IPv6 forms of all of those are refused.
+2. At delivery, the HTTP agent's own DNS lookup checks again and connects to exactly the address it checked. A host that resolved to a public address when saved and to `127.0.0.1` later (**DNS rebinding**) is refused at connect time, with no gap between checking and connecting; that delivery goes straight to the dead-letter queue.
+3. Redirects aren't followed, so a public URL can't bounce the request inward.
+
+`WEBHOOK_ALLOW_PRIVATE_URLS=true` lets a developer point an endpoint at a handler on localhost; the server refuses to start with it in production.
+
+| Endpoint                                                                                                                                                   | Needs                                |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `POST /v1/webhook_endpoints`, `PATCH`/`DELETE /v1/webhook_endpoints/{id}`, `rotate_secret`, `test`, `retry_dead`, `POST /v1/webhook_deliveries/{id}/retry` | `webhooks:manage` (owner, developer) |
+| `GET /v1/webhook_endpoints[/{id}]`, `GET /v1/webhook_deliveries[/{id}]`                                                                                    | `webhooks:read` (also analysts)      |
+
+These are dashboard endpoints (a logged-in user): API keys can take payments but can't redirect where the money's notifications go.
+
 ## Ledger
 
 Every movement of money is recorded in a double-entry ledger, kept separately per merchant and per mode (test and live).

@@ -2,6 +2,10 @@ import { z } from "zod";
 
 // Only for local development and tests; refused in production (see loadConfig)
 const DEV_JWT_SECRET = "dev-only-secret-do-not-use-in-production-0000";
+// 32 zero bytes, base64url: encrypts webhook signing secrets in development and tests only
+const DEV_WEBHOOK_SECRETS_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+const flag = z.enum(["true", "false"]).transform((value) => value === "true");
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 
@@ -70,6 +74,29 @@ const schema = z.object({
   // and how old an unfinished payment must be before we ask
   RECONCILE_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   RECONCILE_AFTER_SECONDS: z.coerce.number().int().min(10).max(86_400).default(120),
+
+  // Webhooks to merchants. Signing secrets are stored encrypted with this key (32 random
+  // bytes, base64url: `node -e "console.log(crypto.randomBytes(32).toString('base64url'))"`)
+  WEBHOOK_SECRETS_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/, "Must be 32 bytes, base64url-encoded (43 characters)")
+    .default(DEV_WEBHOOK_SECRETS_KEY),
+  // Lets webhook URLs point at private addresses (localhost, 10.x, ...). Development only:
+  // in production they are how SSRF reaches internal services
+  WEBHOOK_ALLOW_PRIVATE_URLS: flag.default(false),
+  // Attempts per delivery before it goes to the dead-letter queue, and the backoff between
+  // them: random in [0, min(max, base × 2^attempt)] ("full jitter")
+  WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(8),
+  WEBHOOK_RETRY_BASE_MS: z.coerce.number().int().min(1).default(30_000),
+  WEBHOOK_RETRY_MAX_MS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(6 * 60 * 60 * 1000),
+  WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(10_000),
+  WEBHOOK_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
+  // How often new events are turned into deliveries (0 turns delivery off in this process)
+  WEBHOOK_DISPATCH_INTERVAL_MS: z.coerce.number().int().min(0).default(1000),
 });
 
 export type GatewayKeys = { keyId: string; keySecret: string };
@@ -103,6 +130,16 @@ export type Config = {
   };
   checkoutUrl: string;
   reconcile: { intervalSeconds: number; afterSeconds: number };
+  webhooks: {
+    secretsKey: string;
+    allowPrivateUrls: boolean;
+    maxAttempts: number;
+    retryBaseMs: number;
+    retryMaxMs: number;
+    timeoutMs: number;
+    concurrency: number;
+    dispatchIntervalMs: number;
+  };
   /** Refresh-token cookies are Secure (HTTPS only) everywhere except local development and tests. */
   secureCookies: boolean;
 };
@@ -125,6 +162,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const c = result.data;
   if (c.NODE_ENV === "production" && c.JWT_SECRET === DEV_JWT_SECRET) {
     throw new ConfigError("Invalid configuration:\n  JWT_SECRET: Set a real secret in production");
+  }
+  if (c.NODE_ENV === "production" && c.WEBHOOK_SECRETS_KEY === DEV_WEBHOOK_SECRETS_KEY) {
+    throw new ConfigError(
+      "Invalid configuration:\n  WEBHOOK_SECRETS_KEY: Set a real key in production",
+    );
+  }
+  if (c.NODE_ENV === "production" && c.WEBHOOK_ALLOW_PRIVATE_URLS) {
+    throw new ConfigError(
+      "Invalid configuration:\n  WEBHOOK_ALLOW_PRIVATE_URLS: Not allowed in production",
+    );
   }
   const keyPairs = [
     [
@@ -186,6 +233,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcile: {
       intervalSeconds: c.RECONCILE_INTERVAL_SECONDS,
       afterSeconds: c.RECONCILE_AFTER_SECONDS,
+    },
+    webhooks: {
+      secretsKey: c.WEBHOOK_SECRETS_KEY,
+      allowPrivateUrls: c.WEBHOOK_ALLOW_PRIVATE_URLS,
+      maxAttempts: c.WEBHOOK_MAX_ATTEMPTS,
+      retryBaseMs: c.WEBHOOK_RETRY_BASE_MS,
+      retryMaxMs: c.WEBHOOK_RETRY_MAX_MS,
+      timeoutMs: c.WEBHOOK_TIMEOUT_MS,
+      concurrency: c.WEBHOOK_CONCURRENCY,
+      dispatchIntervalMs: c.WEBHOOK_DISPATCH_INTERVAL_MS,
     },
     secureCookies: c.NODE_ENV === "production",
   };
