@@ -6,6 +6,7 @@ import { ensureAccounts, postEntry } from "../ledger/service.js";
 import { captureLines } from "../ledger/templates.js";
 import type { Models } from "../models/index.js";
 import type { PaymentIntent } from "./models.js";
+import { intentObject } from "./serialize.js";
 import { sourcesOf, type PaymentStatus } from "./stateMachine.js";
 
 export type PaymentDeps = { mongo: Connection; models: Models; feeBasisPoints: number };
@@ -31,7 +32,13 @@ async function recordEvent(
         mode: intent.mode,
         type,
         paymentIntentId: intent._id,
-        data: { status: intent.status, amount: intent.amount, currency: intent.currency },
+        data: {
+          status: intent.status,
+          amount: intent.amount,
+          currency: intent.currency,
+          // What the merchant's webhook receives, as it was at this moment
+          object: intentObject(intent),
+        },
       },
     ],
     { session },

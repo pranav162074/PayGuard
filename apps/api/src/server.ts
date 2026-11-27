@@ -5,6 +5,7 @@ import { createLogger, type Logger } from "./logger.js";
 import { createGateways, reconcile, type CheckoutDeps } from "./payments/checkout.js";
 import { reconcileRefunds } from "./payments/refunds.js";
 import { createRedis } from "./redis.js";
+import { startDispatcher, startWebhookWorker } from "./webhooks/queue.js";
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
@@ -71,6 +72,13 @@ async function main(): Promise<void> {
     config.reconcile.intervalSeconds,
     config.reconcile.afterSeconds,
   );
+  // Webhooks to merchants: the dispatcher turns new events into queued deliveries, the
+  // worker sends them. Both are safe to run in every instance (claims and job ids keep each
+  // delivery to one sender); set WEBHOOK_DISPATCH_INTERVAL_MS=0 to keep an instance out.
+  const webhookDeps = app.locals.webhooks;
+  const stopDispatcher = startDispatcher(webhookDeps);
+  const webhookWorker =
+    config.webhooks.dispatchIntervalMs > 0 ? startWebhookWorker(webhookDeps) : null;
   const server = app.listen(config.port, () => {
     logger.info({ port: config.port, env: config.nodeEnv }, "PayGuard API listening");
   });
@@ -88,10 +96,14 @@ async function main(): Promise<void> {
     }, SHUTDOWN_GRACE_MS);
     force.unref();
     server.close(() => {
-      void Promise.allSettled([mongo.close(), redis.quit()]).then(() => {
-        logger.info("Shutdown complete");
-        process.exit(0);
-      });
+      // Let in-flight deliveries finish before the databases close under them
+      void Promise.allSettled([stopDispatcher(), webhookWorker?.close()])
+        .then(() => Promise.allSettled([webhookDeps.close()]))
+        .then(() => Promise.allSettled([mongo.close(), redis.quit()]))
+        .then(() => {
+          logger.info("Shutdown complete");
+          process.exit(0);
+        });
     });
     server.closeIdleConnections();
   };

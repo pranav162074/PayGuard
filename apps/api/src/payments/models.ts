@@ -87,10 +87,15 @@ export const paymentEventSchema = new Schema(
     type: { type: String, required: true },
     paymentIntentId: { type: String, required: true },
     data: { type: Schema.Types.Mixed, required: true },
+    // The outbox: set once the event has been turned into webhook deliveries
     deliveredAt: { type: Date, default: null },
+    // A dispatcher working on it; another may take over if this is old (it crashed)
+    fanoutClaimedAt: { type: Date, default: null },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
 );
+// Finding the next undelivered events, oldest first
+paymentEventSchema.index({ deliveredAt: 1, createdAt: 1 });
 paymentEventSchema.index({ paymentIntentId: 1, createdAt: 1 });
 paymentEventSchema.index({ merchantId: 1, mode: 1, createdAt: -1 });
 
