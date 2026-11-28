@@ -49,6 +49,7 @@ describe("ledger API", () => {
       "bank",
       "merchant_payable",
       "fee_revenue",
+      "gateway_fees",
     ]);
     const payable = (body: { accounts: { code: string; balance: number }[] }) =>
       body.accounts.find((a) => a.code === "merchant_payable")?.balance;

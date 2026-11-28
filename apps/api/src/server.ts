@@ -5,6 +5,7 @@ import { createLogger, type Logger } from "./logger.js";
 import { createGateways, reconcile, type CheckoutDeps } from "./payments/checkout.js";
 import { reconcileRefunds } from "./payments/refunds.js";
 import { createRedis } from "./redis.js";
+import { startReconciliationScheduler } from "./reconciliation/schedule.js";
 import { startDispatcher, startWebhookWorker } from "./webhooks/queue.js";
 
 const SHUTDOWN_GRACE_MS = 10_000;
@@ -60,14 +61,15 @@ async function main(): Promise<void> {
   const app = createApp({ config, logger, mongo, redis });
   // Unique indexes enforce rules like "one account per email", so they must exist first
   await ensureIndexes(app.locals.models);
+  const checkoutDeps: CheckoutDeps = {
+    mongo,
+    models: app.locals.models,
+    feeBasisPoints: config.platformFeeBps,
+    gateways: createGateways(config),
+    logger,
+  };
   const stopReconciler = startReconciler(
-    {
-      mongo,
-      models: app.locals.models,
-      feeBasisPoints: config.platformFeeBps,
-      gateways: createGateways(config),
-      logger,
-    },
+    checkoutDeps,
     logger,
     config.reconcile.intervalSeconds,
     config.reconcile.afterSeconds,
@@ -79,6 +81,8 @@ async function main(): Promise<void> {
   const stopDispatcher = startDispatcher(webhookDeps);
   const webhookWorker =
     config.webhooks.dispatchIntervalMs > 0 ? startWebhookWorker(webhookDeps) : null;
+  // Last night's reconciliation; BullMQ runs it once however many instances start this
+  const stopReconciliation = await startReconciliationScheduler(checkoutDeps, config);
   const server = app.listen(config.port, () => {
     logger.info({ port: config.port, env: config.nodeEnv }, "PayGuard API listening");
   });
@@ -97,7 +101,7 @@ async function main(): Promise<void> {
     force.unref();
     server.close(() => {
       // Let in-flight deliveries finish before the databases close under them
-      void Promise.allSettled([stopDispatcher(), webhookWorker?.close()])
+      void Promise.allSettled([stopDispatcher(), webhookWorker?.close(), stopReconciliation()])
         .then(() => Promise.allSettled([webhookDeps.close()]))
         .then(() => Promise.allSettled([mongo.close(), redis.quit()]))
         .then(() => {

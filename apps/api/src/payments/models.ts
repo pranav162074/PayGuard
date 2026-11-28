@@ -50,6 +50,9 @@ export const paymentIntentSchema = new Schema(
       method: { type: String, default: null }, // card, upi, netbanking, wallet...
       // Last time we asked Razorpay about this payment (reconciliation backs off on it)
       checkedAt: { type: Date, default: null },
+      // The settlement (bank transfer) Razorpay paid this payment out in
+      settlementId: { type: String, default: null },
+      settledAt: { type: Date, default: null },
     },
     succeededAt: { type: Date, default: null },
     canceledAt: { type: Date, default: null },
@@ -67,6 +70,16 @@ paymentIntentSchema.index(
 paymentIntentSchema.index(
   { "gateway.orderId": 1 },
   { unique: true, partialFilterExpression: { "gateway.orderId": { $type: "string" } } },
+);
+// Reconciliation matches Razorpay's payments by id
+paymentIntentSchema.index(
+  { "gateway.paymentId": 1 },
+  { partialFilterExpression: { "gateway.paymentId": { $type: "string" } } },
+);
+// ...and looks for payments we took that Razorpay never settled
+paymentIntentSchema.index(
+  { mode: 1, status: 1, succeededAt: 1 },
+  { partialFilterExpression: { "gateway.provider": "razorpay" } },
 );
 // The reconciler's query: unfinished payments that have a gateway order
 paymentIntentSchema.index(

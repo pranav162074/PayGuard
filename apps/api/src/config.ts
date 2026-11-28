@@ -97,6 +97,13 @@ const schema = z.object({
   WEBHOOK_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
   // How often new events are turned into deliveries (0 turns delivery off in this process)
   WEBHOOK_DISPATCH_INTERVAL_MS: z.coerce.number().int().min(0).default(1000),
+
+  // Nightly reconciliation of the previous day (India time), as a cron pattern; blank turns
+  // it off. 06:00 IST: Razorpay's settlement report for the day before is ready by then.
+  RECONCILIATION_CRON: z.string().default("0 6 * * *"),
+  RECONCILIATION_TIMEZONE: z.string().default("Asia/Kolkata"),
+  // Live payments still unsettled after this many days are flagged
+  SETTLEMENT_OVERDUE_DAYS: z.coerce.number().int().min(1).max(30).default(3),
 });
 
 export type GatewayKeys = { keyId: string; keySecret: string };
@@ -130,6 +137,7 @@ export type Config = {
   };
   checkoutUrl: string;
   reconcile: { intervalSeconds: number; afterSeconds: number };
+  reconciliation: { cron: string | null; timezone: string; overdueDays: number };
   webhooks: {
     secretsKey: string;
     allowPrivateUrls: boolean;
@@ -233,6 +241,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reconcile: {
       intervalSeconds: c.RECONCILE_INTERVAL_SECONDS,
       afterSeconds: c.RECONCILE_AFTER_SECONDS,
+    },
+    reconciliation: {
+      cron: c.RECONCILIATION_CRON.trim() || null,
+      timezone: c.RECONCILIATION_TIMEZONE,
+      overdueDays: c.SETTLEMENT_OVERDUE_DAYS,
     },
     webhooks: {
       secretsKey: c.WEBHOOK_SECRETS_KEY,
