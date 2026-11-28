@@ -15,12 +15,31 @@ export function captureLines(amount: number, fee: number): LineInput[] {
   return lines;
 }
 
-/** The gateway paid out: the receivable becomes cash in the bank. */
-export function settlementLines(amount: number): LineInput[] {
-  return [
-    { account: "bank", direction: "debit", amount },
-    { account: "gateway_receivable", direction: "credit", amount },
-  ];
+/**
+ * The gateway paid out. It settles the payments minus the refunds (`gross`, which clears that
+ * much of the receivable), keeping its own fee and tax: the bank gets the rest, and the fee
+ * is our expense. Without fees this is just receivable → bank.
+ *
+ * `gross` can be negative (a day with more refunds than payments): then the gateway takes
+ * money back and the lines flip.
+ */
+export function settlementLines(gross: number, gatewayFees = 0): LineInput[] {
+  const net = gross - gatewayFees;
+  const lines: LineInput[] = [];
+  if (net !== 0) {
+    lines.push({ account: "bank", direction: net > 0 ? "debit" : "credit", amount: Math.abs(net) });
+  }
+  if (gatewayFees > 0) {
+    lines.push({ account: "gateway_fees", direction: "debit", amount: gatewayFees });
+  }
+  if (gross !== 0) {
+    lines.push({
+      account: "gateway_receivable",
+      direction: gross > 0 ? "credit" : "debit",
+      amount: Math.abs(gross),
+    });
+  }
+  return lines;
 }
 
 /**

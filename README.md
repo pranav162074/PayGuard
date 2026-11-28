@@ -249,6 +249,41 @@ payment change + payment_events row      one MongoDB transaction: the outbox
 
 These are dashboard endpoints (a logged-in user): API keys can take payments but can't redirect where the money's notifications go.
 
+## Reconciliation and settlements
+
+Webhooks and the reconciler keep each payment right as it happens. Once a night, a BullMQ job checks the previous day as a whole, from Razorpay's side, the way a finance team would ([`reconciliation/service.ts`](apps/api/src/reconciliation/service.ts)):
+
+1. **Payments.** Every payment Razorpay captured that day (`GET /payments`, paginated) is matched to a payment intent by payment id, or by order id: same status, amount and refunded total. A capture we never heard about (the customer closed the tab, the webhook was lost) is synced through the normal path and recorded as fixed. In the other direction, every payment we recorded as succeeded must be captured at Razorpay; one near midnight that's in the neighbouring day's list is checked individually before it's flagged.
+2. **Settlements.** Razorpay's settlement report for the day (`GET /settlements/recon/combined`) lists each payment, refund and adjustment it paid out, and the bank transfer it was in. Every line is matched to ours. Each settlement is split by merchant and posted to the ledger as one entry per merchant, idempotent on the settlement id, so re-runs never post twice:
+
+   | account                  |        |                                                         |
+   | ------------------------ | ------ | ------------------------------------------------------- |
+   | `bank`                   | debit  | what arrived: payments − refunds − Razorpay's fee − GST |
+   | `gateway_fees` (expense) | debit  | Razorpay's fee + GST                                    |
+   | `gateway_receivable`     | credit | payments − refunds: no longer owed by Razorpay          |
+
+   A day with more refunds than payments flips the lines (Razorpay takes money back). If that would take the bank negative, the entry is refused and flagged rather than forced.
+
+3. **Ageing.** Live payments captured more than `SETTLEMENT_OVERDUE_DAYS` ago and in no settlement are flagged, and cleared once they settle. Test mode skips this; Razorpay never settles test payments.
+
+Each problem becomes one **mismatch** row (`late_capture`, `status_mismatch`, `amount_mismatch`, `refund_mismatch`, `missing_at_gateway`, `unknown_at_gateway`, `settlement_amount_mismatch`, `settlement_overdue`, `adjustment`, `ledger_rejected`) with what was expected, what was found, and a message in rupees. The same problem found again is the same row. Re-running a day is safe, and it's how fixes are confirmed: a mismatch the re-run no longer finds is resolved automatically. A person can resolve the rest with a note (`reconciliation:manage`); a manually resolved one isn't reopened by later runs.
+
+Runs are per mode and day (India time, Razorpay's). Two at once on the same day are refused (`409 already_running`), a run that died is taken over after 30 minutes, and a failed run says why. The BullMQ job scheduler keeps one nightly schedule however many instances start, and retries a failed night three times, an hour apart.
+
+| Endpoint                                                            | Needs                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------- |
+| `GET /v1/reconciliation/runs`, `GET /v1/reconciliation/runs/{id}`   | `reconciliation:read` (owner, developer, analyst) |
+| `GET /v1/reconciliation/runs/{id}/report.csv`                       | `reconciliation:read`                             |
+| `GET /v1/reconciliation/mismatches?status=open&type=&run=`          | `reconciliation:read`                             |
+| `POST /v1/reconciliation/mismatches/{id}/resolve` (`note` required) | `reconciliation:manage` (owner, developer)        |
+| `GET /v1/settlements`, `GET /v1/settlements/{id}`                   | `reconciliation:read`                             |
+
+Settlements cover every merchant, but each merchant sees only its own share: its runs' numbers (captured per Razorpay vs per our ledger, the difference, net settled), its mismatches and its part of each transfer. Lines no merchant can be traced to stay in the operator's logs and database. The CSV export quotes every cell and defuses cells starting with `=`, `+`, `-` or `@`, so a spreadsheet won't run a value as a formula (CSV injection).
+
+```bash
+npm run reconcile -w apps/api -- --date 2026-11-27 --mode test   # by hand; default: yesterday, every mode with keys
+```
+
 ## Ledger
 
 Every movement of money is recorded in a double-entry ledger, kept separately per merchant and per mode (test and live).

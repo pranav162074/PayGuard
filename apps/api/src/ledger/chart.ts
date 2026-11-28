@@ -43,6 +43,12 @@ export const CHART: readonly AccountSpec[] = [
     type: "revenue",
     allowNegative: true,
   },
+  {
+    code: "gateway_fees",
+    name: "Fees the payment gateway charged (with GST), deducted from settlements",
+    type: "expense",
+    allowNegative: true,
+  },
 ];
 
 export const ACCOUNT_CODES = CHART.map((a) => a.code);

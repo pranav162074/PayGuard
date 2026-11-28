@@ -21,6 +21,15 @@ import {
   type PaymentModels,
 } from "../payments/models.js";
 import {
+  reconciliationRunSchema,
+  reconMismatchSchema,
+  settlementSchema,
+  type ReconciliationModels,
+  type ReconciliationRun,
+  type ReconMismatch,
+  type Settlement,
+} from "../reconciliation/models.js";
+import {
   webhookDeliverySchema,
   webhookEndpointSchema,
   type WebhookDelivery,
@@ -138,7 +147,8 @@ export type ApiKey = InferSchemaType<typeof apiKeySchema> & { _id: Types.ObjectI
 
 export type Models = LedgerModels &
   PaymentModels &
-  WebhookModels & {
+  WebhookModels &
+  ReconciliationModels & {
     User: Model<User>;
     Merchant: Model<Merchant>;
     Membership: Model<Membership>;
@@ -192,6 +202,17 @@ export function registerModels(connection: Connection): Models {
       webhookEndpointSchema,
       "webhook_endpoints",
     ),
+    ReconciliationRun: connection.model<ReconciliationRun>(
+      "ReconciliationRun",
+      reconciliationRunSchema,
+      "reconciliation_runs",
+    ),
+    ReconMismatch: connection.model<ReconMismatch>(
+      "ReconMismatch",
+      reconMismatchSchema,
+      "reconciliation_mismatches",
+    ),
+    Settlement: connection.model<Settlement>("Settlement", settlementSchema, "settlements"),
     WebhookDelivery: connection.model<WebhookDelivery>(
       "WebhookDelivery",
       webhookDeliverySchema,

@@ -24,6 +24,7 @@ import { ledgerRouter } from "./routes/ledger.js";
 import { meRouter } from "./routes/me.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { teamRouter } from "./routes/team.js";
+import { reconciliationRouter } from "./routes/reconciliation.js";
 import { webhookEndpointsRouter } from "./routes/webhookEndpoints.js";
 import { webhooksRouter } from "./routes/webhooks.js";
 import type { WebhookDeps } from "./webhooks/delivery.js";
@@ -129,6 +130,7 @@ export function createApp({
   app.use(paymentsRouter(deps));
   app.use(checkoutRouter(deps));
   app.use(webhookEndpointsRouter(deps));
+  app.use(reconciliationRouter(deps));
 
   app.use(notFound);
   app.use(errorHandler(logger));

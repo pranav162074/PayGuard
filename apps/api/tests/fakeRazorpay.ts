@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
 
-import type { RazorpayOrder, RazorpayPayment, RazorpayRefund } from "../src/gateway/razorpay.js";
+import type {
+  RazorpayOrder,
+  RazorpayPayment,
+  RazorpayReconItem,
+  RazorpayRefund,
+} from "../src/gateway/razorpay.js";
 
 /**
  * An in-memory stand-in for Razorpay's Orders and Payments API, served through a `fetch`
@@ -20,6 +25,10 @@ export class FakeRazorpay {
   refundOutcome: "processed" | "pending" | "rejected" = "processed";
   /** Creates the next refund, then answers 503: Razorpay did it, but we never heard. */
   loseNextRefundResponse = false;
+  /** Unix seconds: when new payments are made. Tests move it to place payments in a day. */
+  clock: () => number = () => Math.floor(Date.now() / 1000);
+  /** Settlement report lines, by day ("2026-11-27") */
+  recon = new Map<string, RazorpayReconItem[]>();
   private seq = 0;
 
   constructor(
@@ -50,6 +59,7 @@ export class FakeRazorpay {
       status: outcome === "failure" ? "failed" : this.autoCapture ? "captured" : "authorized",
       error_code: outcome === "failure" ? "BAD_REQUEST_ERROR" : null,
       error_description: outcome === "failure" ? "Payment declined by bank" : null,
+      created_at: this.clock(),
       ...overrides,
     };
     this.payments.set(payment.id, payment);
@@ -64,6 +74,84 @@ export class FakeRazorpay {
     if (!refund) throw new Error(`No refund ${refundId}`);
     refund.status = status;
     return refund;
+  }
+
+  /**
+   * Razorpay pays out: a settlement for `date` covering these payments (minus its 2% fee and
+   * 18% GST on it) and refunds. Returns the settlement id.
+   */
+  settle(
+    date: string,
+    {
+      payments = [],
+      refunds = [],
+      adjustments = [],
+    }: {
+      payments?: string[];
+      refunds?: string[];
+      adjustments?: { credit?: number; debit?: number }[];
+    },
+  ): string {
+    const settlementId = this.id("setl");
+    const utr = `UTR${String(this.seq).padStart(10, "0")}`;
+    const settledAt = this.clock();
+    const base = {
+      currency: "INR",
+      settled: true,
+      settlement_id: settlementId,
+      settlement_utr: utr,
+      settled_at: settledAt,
+    };
+    const lines: RazorpayReconItem[] = [
+      ...payments.map((id) => {
+        const payment = this.payments.get(id);
+        if (!payment) throw new Error(`No payment ${id}`);
+        const fee = Math.round(payment.amount * 0.02);
+        const tax = Math.round(fee * 0.18);
+        return {
+          ...base,
+          entity_id: id,
+          type: "payment" as const,
+          amount: payment.amount,
+          fee,
+          tax,
+          credit: payment.amount - fee - tax,
+          debit: 0,
+          order_id: payment.order_id,
+          payment_id: id,
+        };
+      }),
+      ...refunds.map((id) => {
+        const refund = this.refunds.get(id);
+        if (!refund) throw new Error(`No refund ${id}`);
+        return {
+          ...base,
+          entity_id: id,
+          type: "refund" as const,
+          amount: refund.amount,
+          fee: 0,
+          tax: 0,
+          credit: 0,
+          debit: refund.amount,
+          order_id: null,
+          payment_id: refund.payment_id,
+        };
+      }),
+      ...adjustments.map((a) => ({
+        ...base,
+        entity_id: this.id("adj"),
+        type: "adjustment" as const,
+        amount: Math.abs((a.credit ?? 0) - (a.debit ?? 0)),
+        fee: 0,
+        tax: 0,
+        credit: a.credit ?? 0,
+        debit: a.debit ?? 0,
+        order_id: null,
+        payment_id: null,
+      })),
+    ];
+    this.recon.set(date, [...(this.recon.get(date) ?? []), ...lines]);
+    return settlementId;
   }
 
   refundsOf(paymentId: string): RazorpayRefund[] {
@@ -91,6 +179,30 @@ export class FakeRazorpay {
     const body =
       typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
 
+    if (method === "GET" && path === "/payments") {
+      const from = Number(url.searchParams.get("from"));
+      const to = Number(url.searchParams.get("to"));
+      const count = Number(url.searchParams.get("count") ?? 10);
+      const skip = Number(url.searchParams.get("skip") ?? 0);
+      const items = [...this.payments.values()]
+        .filter((p) => (p.created_at ?? 0) >= from && (p.created_at ?? 0) < to)
+        .map((p) => ({
+          ...p,
+          amount_refunded: this.refundsOf(p.id)
+            .filter((r) => r.status !== "failed")
+            .reduce((sum, r) => sum + r.amount, 0),
+        }))
+        .slice(skip, skip + count);
+      return json(200, { entity: "collection", count: items.length, items });
+    }
+    if (method === "GET" && path === "/settlements/recon/combined") {
+      const [year, month, day] = ["year", "month", "day"].map((k) => url.searchParams.get(k));
+      const date = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      const count = Number(url.searchParams.get("count") ?? 10);
+      const skip = Number(url.searchParams.get("skip") ?? 0);
+      const items = (this.recon.get(date) ?? []).slice(skip, skip + count);
+      return json(200, { entity: "collection", count: items.length, items });
+    }
     if (method === "POST" && path === "/orders") {
       const order = {
         id: this.id("order"),

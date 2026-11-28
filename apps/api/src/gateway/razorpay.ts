@@ -27,7 +27,37 @@ export type RazorpayPayment = {
   method: string | null;
   error_code: string | null;
   error_description: string | null;
+  /** Unix seconds */
+  created_at?: number;
+  amount_refunded?: number;
 };
+
+/**
+ * One line of Razorpay's settlement reconciliation report (GET /settlements/recon/combined):
+ * a payment, refund or adjustment, and the settlement (bank transfer) it was paid out in.
+ */
+export type RazorpayReconItem = {
+  entity_id: string;
+  type: "payment" | "refund" | "adjustment" | "transfer";
+  /** The payment or refund amount, in paise */
+  amount: number;
+  /** Razorpay's fee and the GST on it, in paise (payments only) */
+  fee: number;
+  tax: number;
+  /** What the line added to (credit) or took from (debit) the settlement */
+  credit: number;
+  debit: number;
+  currency: string;
+  settled: boolean;
+  settlement_id: string | null;
+  settlement_utr: string | null;
+  /** Unix seconds */
+  settled_at: number | null;
+  order_id: string | null;
+  payment_id: string | null;
+};
+
+const PAGE = 100;
 
 export type RazorpayRefund = {
   id: string;
@@ -141,6 +171,32 @@ export class RazorpayClient {
 
   getRefund(refundId: string): Promise<RazorpayRefund> {
     return this.call<RazorpayRefund>("GET", `/refunds/${encodeURIComponent(refundId)}`);
+  }
+
+  /** Every payment created in [from, to), unix seconds, following Razorpay's pagination. */
+  async listPayments(from: number, to: number): Promise<RazorpayPayment[]> {
+    const all: RazorpayPayment[] = [];
+    for (let skip = 0; ; skip += PAGE) {
+      const page = await this.call<{ items: RazorpayPayment[] }>(
+        "GET",
+        `/payments?from=${from}&to=${to}&count=${PAGE}&skip=${skip}`,
+      );
+      all.push(...page.items);
+      if (page.items.length < PAGE) return all;
+    }
+  }
+
+  /** The settlement report for one day: every line settled that day. */
+  async settlementRecon(year: number, month: number, day: number): Promise<RazorpayReconItem[]> {
+    const all: RazorpayReconItem[] = [];
+    for (let skip = 0; ; skip += PAGE) {
+      const page = await this.call<{ items: RazorpayReconItem[] }>(
+        "GET",
+        `/settlements/recon/combined?year=${year}&month=${month}&day=${day}&count=${PAGE}&skip=${skip}`,
+      );
+      all.push(...page.items);
+      if (page.items.length < PAGE) return all;
+    }
   }
 
   /** Captures an authorized payment (only needed when the account doesn't auto-capture). */
